@@ -7,10 +7,7 @@ import os
 import re
 from glob import glob
 
-# ==========================================================
 # CONFIGURACIÓN
-# ==========================================================
-
 CARPETA_VIDEOS = r'D:\MDT\Pruebas\II28P\1'
 
 PATRON_VIDEOS = '*.avi'
@@ -34,10 +31,7 @@ MAX_DELTA_CM = 0.05      # aumentado para capturar cambios rápidos al inicio
 # Umbral para excluir píxeles oscuros
 UMBRAL_LANZA = 30
 
-# ==========================================================
 # FUNCIONES
-# ==========================================================
-
 def get_scale(width, height):
     root = tk.Tk()
     sw = root.winfo_screenwidth()
