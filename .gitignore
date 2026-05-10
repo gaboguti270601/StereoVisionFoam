@@ -1,0 +1,20 @@
+# Python
+__pycache__/
+*.pyc
+
+# Entornos virtuales
+venv/
+.env/
+
+# Videos
+*.avi
+*.mp4
+
+# Resultados
+resultados/
+
+# CSV
+*.csv
+
+# VSCode
+.vscode/
