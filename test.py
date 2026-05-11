@@ -7,7 +7,10 @@ import os
 import re
 from glob import glob
 
+# ==========================================================
 # CONFIGURACIÓN
+# ==========================================================
+
 CARPETA_VIDEOS = r'D:\MDT\Pruebas\II28P\1'
 
 PATRON_VIDEOS = '*.avi'
@@ -15,27 +18,41 @@ PATRON_VIDEOS = '*.avi'
 ALTURA_CRISOL_CM = 9.0
 ALTURA_BASE_CM = 2.0
 
-# Frame usado SOLO UNA VEZ para referencia global
 FRAME_REFERENCIA = 1800
 
-# Suavizado temporal
-SUAVIZADO = 0.10
+# ==========================================================
+# FILTRADO / ESTABILIDAD
+# ==========================================================
 
-# Límite físico
+SUAVIZADO = 0.15
+
 ALTURA_MIN_CM = 1.5
 ALTURA_MAX_CM = 9.0
 
-# Cambio máximo permitido entre frames
-MAX_DELTA_CM = 0.20
+MAX_DELTA_CM = 0.08
 
-# Umbral para excluir píxeles oscuros (lanza)
 UMBRAL_LANZA = 30
 
+# Tracking temporal
+VENTANA_TRACKING = 40
+
+# ==========================================================
+# VARIABLE GLOBAL TRACKING
+# ==========================================================
+
+nivel_anterior = None
+
+# ==========================================================
 # FUNCIONES
+# ==========================================================
+
 def get_scale(width, height):
+
     root = tk.Tk()
+
     sw = root.winfo_screenwidth()
     sh = root.winfo_screenheight()
+
     root.destroy()
 
     escala = min(sw / width, sh / height)
@@ -73,28 +90,55 @@ def seleccionar_roi(frame, escala):
     )
 
 
-def detectar_altura_roi(roi, umbral_lanza=UMBRAL_LANZA):
+# ==========================================================
+# DETECCIÓN CON TRACKING TEMPORAL
+# ==========================================================
 
-    gray = cv2.cvtColor(roi, cv2.COLOR_BGR2GRAY)
+def detectar_altura_roi(
+    roi,
+    umbral_lanza=UMBRAL_LANZA
+):
 
-    blur = cv2.GaussianBlur(gray, (9, 9), 0)
+    global nivel_anterior
+
+    gray = cv2.cvtColor(
+        roi,
+        cv2.COLOR_BGR2GRAY
+    )
+
+    blur = cv2.GaussianBlur(
+        gray,
+        (9, 9),
+        0
+    )
+
+    # ======================================================
+    # PERFIL VERTICAL
+    # ======================================================
 
     perfil = np.zeros(blur.shape[0])
-
-     
-    # PERFIL VERTICAL IGNORANDO ZONAS OSCURAS
-     
 
     for i in range(blur.shape[0]):
 
         fila = blur[i, :]
 
-        pixeles_validos = fila[fila > umbral_lanza]
+        pixeles_validos = fila[
+            fila > umbral_lanza
+        ]
 
         if len(pixeles_validos) > 0:
-            perfil[i] = np.mean(pixeles_validos)
+
+            perfil[i] = np.mean(
+                pixeles_validos
+            )
+
         else:
+
             perfil[i] = 0
+
+    # ======================================================
+    # SUAVIZADO PERFIL
+    # ======================================================
 
     perfil = cv2.GaussianBlur(
         perfil.reshape(-1, 1),
@@ -102,17 +146,64 @@ def detectar_altura_roi(roi, umbral_lanza=UMBRAL_LANZA):
         0
     ).flatten()
 
+    # ======================================================
+    # GRADIENTE
+    # ======================================================
+
     grad = np.gradient(perfil)
 
-    # Evitar bordes extremos
+    # ======================================================
+    # EVITAR BORDES
+    # ======================================================
+
     zona_superior = int(len(grad) * 0.15)
     zona_inferior = int(len(grad) * 0.95)
 
-    grad_util = grad[zona_superior:zona_inferior]
+    # ======================================================
+    # PRIMER FRAME → BÚSQUEDA GLOBAL
+    # ======================================================
 
-    idx = np.argmax(np.abs(grad_util))
+    if nivel_anterior is None:
 
-    nivel = idx + zona_superior
+        grad_util = grad[
+            zona_superior:zona_inferior
+        ]
+
+        idx = np.argmax(
+            np.abs(grad_util)
+        )
+
+        nivel = idx + zona_superior
+
+    # ======================================================
+    # TRACKING TEMPORAL
+    # ======================================================
+
+    else:
+
+        y0 = max(
+            zona_superior,
+            nivel_anterior - VENTANA_TRACKING
+        )
+
+        y1 = min(
+            zona_inferior,
+            nivel_anterior + VENTANA_TRACKING
+        )
+
+        grad_local = grad[y0:y1]
+
+        idx_local = np.argmax(
+            np.abs(grad_local)
+        )
+
+        nivel = idx_local + y0
+
+    # ======================================================
+    # ACTUALIZAR TRACKING
+    # ======================================================
+
+    nivel_anterior = nivel
 
     return nivel
 
@@ -126,6 +217,7 @@ def parse_timestamp_from_filename(video_path):
     parts = name_no_ext.split('_')
 
     if len(parts) < 2:
+
         raise ValueError(
             "El nombre del archivo no contiene timestamp"
         )
@@ -136,9 +228,15 @@ def parse_timestamp_from_filename(video_path):
 
         date_part, time_part = timestamp_str.split('T')
 
-        time_part_corrected = re.sub(r'-', ':', time_part)
+        time_part_corrected = re.sub(
+            r'-',
+            ':',
+            time_part
+        )
 
-        datetime_str = f"{date_part}T{time_part_corrected}"
+        datetime_str = (
+            f"{date_part}T{time_part_corrected}"
+        )
 
     else:
 
@@ -150,27 +248,41 @@ def parse_timestamp_from_filename(video_path):
     )
 
 
-
+# ==========================================================
 # MAIN
+# ==========================================================
+
 def main():
 
+    global nivel_anterior
+
     lista_videos = sorted(
-        glob(os.path.join(CARPETA_VIDEOS, PATRON_VIDEOS))
+        glob(
+            os.path.join(
+                CARPETA_VIDEOS,
+                PATRON_VIDEOS
+            )
+        )
     )
 
     if len(lista_videos) == 0:
+
         print("No se encontraron videos")
+
         return
 
-    print("\n====================================")
+    print("\n================================")
     print("VIDEOS ENCONTRADOS")
-    print("====================================\n")
+    print("================================\n")
 
     for v in lista_videos:
+
         print(os.path.basename(v))
 
-     
+    # ======================================================
     # ROI SOLO UNA VEZ
+    # ======================================================
+
     primer_video = lista_videos[0]
 
     cap = cv2.VideoCapture(primer_video)
@@ -178,14 +290,19 @@ def main():
     ret, frame = cap.read()
 
     if not ret:
+
         print("Error leyendo primer video")
+
         return
 
     h, w = frame.shape[:2]
 
     escala = get_scale(w, h)
 
-    roi_data = seleccionar_roi(frame, escala)
+    roi_data = seleccionar_roi(
+        frame,
+        escala
+    )
 
     if roi_data is None:
         return
@@ -194,13 +311,17 @@ def main():
 
     cap.release()
 
-     
-    # CALIBRACIÓN GLOBAL SOLO UNA VEZ
-    print("\n====================================")
-    print("CALIBRACIÓN GLOBAL")
-    print("====================================")
+    # ======================================================
+    # REFERENCIA GLOBAL
+    # ======================================================
 
-    cap_ref = cv2.VideoCapture(lista_videos[0])
+    print("\n================================")
+    print("CALIBRACIÓN GLOBAL")
+    print("================================")
+
+    cap_ref = cv2.VideoCapture(
+        lista_videos[0]
+    )
 
     cap_ref.set(
         cv2.CAP_PROP_POS_FRAMES,
@@ -210,64 +331,87 @@ def main():
     ret, frame_ref = cap_ref.read()
 
     if not ret:
+
         print("Error frame referencia")
+
         return
 
-    roi_ref = frame_ref[y:y+rh, x:x+rw]
+    roi_ref = frame_ref[
+        y:y+rh,
+        x:x+rw
+    ]
 
-    nivel_ref = detectar_altura_roi(roi_ref)
+    nivel_ref = detectar_altura_roi(
+        roi_ref
+    )
 
-    print(f"Nivel referencia global: {nivel_ref}")
+    print(
+        f"Nivel referencia global: {nivel_ref}"
+    )
 
     cap_ref.release()
 
-     
+    # ======================================================
     # VARIABLES GLOBALES
-     
+    # ======================================================
 
     timestamps_totales = []
+
     alturas_totales = []
 
-    # IMPORTANTE:
-    # Se mantiene entre videos
     altura_suavizada = ALTURA_BASE_CM
 
-     
+    # ======================================================
     # PROCESAR TODOS LOS VIDEOS
+    # ======================================================
+
     for video_idx, VIDEO_PATH in enumerate(lista_videos):
 
-        print("\n====================================")
+        print("\n================================")
         print(f"Procesando video {video_idx+1}")
         print(os.path.basename(VIDEO_PATH))
-        print("====================================")
+        print("================================")
 
         cap = cv2.VideoCapture(VIDEO_PATH)
 
         if not cap.isOpened():
+
             print("No se pudo abrir")
+
             continue
 
-        fps = cap.get(cv2.CAP_PROP_FPS)
+        fps = cap.get(
+            cv2.CAP_PROP_FPS
+        )
 
         if fps <= 0:
             fps = 30
 
         total_frames = int(
-            cap.get(cv2.CAP_PROP_FRAME_COUNT)
+            cap.get(
+                cv2.CAP_PROP_FRAME_COUNT
+            )
         )
 
         print(f"FPS: {fps:.2f}")
         print(f"Frames: {total_frames}")
 
-        timestamp_inicial = parse_timestamp_from_filename(
-            VIDEO_PATH
+        timestamp_inicial = (
+            parse_timestamp_from_filename(
+                VIDEO_PATH
+            )
         )
 
-        print(f"Inicio: {timestamp_inicial}")
+        print(
+            f"Inicio: {timestamp_inicial}"
+        )
 
         frame_id = 0
 
+        # ==================================================
         # LOOP VIDEO
+        # ==================================================
+
         while True:
 
             ret, frame = cap.read()
@@ -275,59 +419,94 @@ def main():
             if not ret:
                 break
 
-            roi = frame[y:y+rh, x:x+rw]
+            roi = frame[
+                y:y+rh,
+                x:x+rw
+            ]
 
             if roi.size == 0:
                 break
 
+            # ==============================================
             # DETECCIÓN NIVEL
+            # ==============================================
+
             nivel = detectar_altura_roi(roi)
 
-            # ALTURA RELATIVA
+            # ==============================================
+            # ALTURA
+            # ==============================================
 
             delta_pix = nivel_ref - nivel
 
             altura_medida = (
                 ALTURA_BASE_CM
-                + (delta_pix / rh) * ALTURA_CRISOL_CM
+                + (delta_pix / rh)
+                * ALTURA_CRISOL_CM
             )
 
+            # ==============================================
             # LIMITES FÍSICOS
+            # ==============================================
+
             altura_medida = np.clip(
                 altura_medida,
                 ALTURA_MIN_CM,
                 ALTURA_MAX_CM
             )
 
-
+            # ==============================================
             # LIMITAR CAMBIOS BRUSCOS
+            # ==============================================
+
             delta = np.clip(
                 altura_medida - altura_suavizada,
                 -MAX_DELTA_CM,
                 MAX_DELTA_CM
             )
 
-            altura_actual = altura_suavizada + delta
-
-            # SUAVIZADO TEMPORAL
-            altura_suavizada = (
-                (1 - SUAVIZADO) * altura_suavizada
-                + SUAVIZADO * altura_actual
+            altura_actual = (
+                altura_suavizada + delta
             )
 
-            # TIMESTAMP ABSOLUTO
-            tiempo_transcurrido = frame_id / fps
+            # ==============================================
+            # SUAVIZADO
+            # ==============================================
+
+            altura_suavizada = (
+                (1 - SUAVIZADO)
+                * altura_suavizada
+                + SUAVIZADO
+                * altura_actual
+            )
+
+            # ==============================================
+            # TIMESTAMP
+            # ==============================================
+
+            tiempo_transcurrido = (
+                frame_id / fps
+            )
 
             timestamp_actual = (
                 timestamp_inicial
-                + timedelta(seconds=tiempo_transcurrido)
+                + timedelta(
+                    seconds=tiempo_transcurrido
+                )
             )
 
-            timestamps_totales.append(timestamp_actual)
+            timestamps_totales.append(
+                timestamp_actual
+            )
 
-            alturas_totales.append(altura_suavizada)
+            alturas_totales.append(
+                altura_suavizada
+            )
 
+            # ==============================================
             # VISUALIZACIÓN
+            # ==============================================
+
             vis = frame.copy()
 
             # ROI
@@ -347,7 +526,7 @@ def main():
                 (x, y_line),
                 (x + rw, y_line),
                 (0, 0, 255),
-                2
+                3
             )
 
             # Altura
@@ -388,7 +567,10 @@ def main():
 
                 vis_mostrar = cv2.resize(
                     vis,
-                    (int(w * escala), int(h * escala))
+                    (
+                        int(w * escala),
+                        int(h * escala)
+                    )
                 )
 
             else:
@@ -400,13 +582,16 @@ def main():
                 vis_mostrar
             )
 
+            # ==============================================
             # DEBUG
+            # ==============================================
+
             if frame_id % 300 == 0:
 
                 print(
                     f"Frame {frame_id}/{total_frames} | "
                     f"{altura_suavizada:.2f} cm | "
-                    f"{timestamp_actual}"
+                    f"Nivel: {nivel}"
                 )
 
             frame_id += 1
@@ -418,12 +603,16 @@ def main():
 
         cap.release()
 
-     
+    # ======================================================
     # FINAL
+    # ======================================================
+
     cv2.destroyAllWindows()
 
-
+    # ======================================================
     # GUARDAR EXCEL
+    # ======================================================
+
     if len(timestamps_totales) > 0:
 
         df = pd.DataFrame({
@@ -433,7 +622,7 @@ def main():
 
         excel_path = os.path.join(
             CARPETA_VIDEOS,
-            'alturas_todos_los_videos_continuo.xlsx'
+            'alturas_todos_los_videos_tracking.xlsx'
         )
 
         df.to_excel(
@@ -441,9 +630,9 @@ def main():
             index=False
         )
 
-        print("\n====================================")
+        print("\n================================")
         print("EXCEL GUARDADO")
-        print("====================================")
+        print("================================")
         print(excel_path)
 
     else:
