@@ -8,10 +8,10 @@ from sklearn.metrics import mean_absolute_error, r2_score
 # CONFIGURACIÓN
 # =========================================================
 
-CSV_REAL = r"D:\MDT\Pruebas\II29P\1\dataset_features.csv"
-CSV_AUMENTADO = r"D:\MDT\Pruebas\II29P\1\dataset_aumentado.csv"
+CSV_REAL = r"D:\MDT\Pruebas\II28P\1\dataset_features.csv"
+CSV_AUMENTADO = r"D:\MDT\Pruebas\II28P\1\dataset_aumentado.csv"
 
-MODELO_SALIDA = r"D:\MDT\Pruebas\II29P\1\modelo_espuma_validado.pkl"
+MODELO_SALIDA = r"D:\MDT\Pruebas\II28P\1\modelo_espuma_validado.pkl"
 
 # =========================================================
 # CARGAR DATASETS

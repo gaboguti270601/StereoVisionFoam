@@ -2,7 +2,7 @@ import pandas as pd
 import matplotlib.pyplot as plt
 
 # Cargar datos
-df = pd.read_excel(r'D:\MDT\Pruebas\II29P\1\altura_estimada_ml.xlsx')
+df = pd.read_excel(r'D:\MDT\Pruebas\II28P\1\altura_estimada_ml.xlsx')
 df['Timestamp'] = pd.to_datetime(df['Timestamp'])  # convertir a datetime
 
 # --- Gráfico de líneas ---

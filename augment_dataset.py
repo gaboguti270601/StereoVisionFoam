@@ -5,9 +5,9 @@ import numpy as np
 # CONFIGURACIÓN
 # =============================
 
-ARCHIVO = r"D:\MDT\Pruebas\II29P\1\dataset_features.csv"
+ARCHIVO = r"D:\MDT\Pruebas\II28P\1\dataset_features.csv"
 
-SALIDA = r"D:\MDT\Pruebas\II29P\1\dataset_aumentado.csv"
+SALIDA = r"D:\MDT\Pruebas\II28P\1\dataset_aumentado.csv"
 
 NUEVAS_MUESTRAS = 300
 

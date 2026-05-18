@@ -7,14 +7,14 @@ import joblib
 from datetime import datetime, timedelta
 
 # =========================================================
-# CONFIGURACIÓN II29P
+# CONFIGURACIÓN II28P
 # =========================================================
 
-CARPETA_VIDEOS = r"D:\MDT\Pruebas\II29P\1"
+CARPETA_VIDEOS = r"D:\MDT\Pruebas\II28P\1"
 
-MODELO_PATH = r"D:\MDT\Pruebas\II29P\1\modelo_espuma_validado.pkl"
+MODELO_PATH = r"D:\MDT\Pruebas\II28P\1\modelo_espuma_validado.pkl"
 
-SALIDA_EXCEL = r"D:\MDT\Pruebas\II29P\1\altura_estimada_ml.xlsx"
+SALIDA_EXCEL = r"D:\MDT\Pruebas\II28P\1\altura_estimada_ml.xlsx"
 
 ROI = {
     "x": 435,
@@ -27,8 +27,8 @@ FRAME_SKIP = 30
 
 ALPHA = 0.85
 
-TEMPERATURA_C = 1350
-EXPERIENCIA = 29
+TEMPERATURA_C = 1250
+EXPERIENCIA = 28
 
 # =========================================================
 # FUNCIONES
@@ -85,16 +85,26 @@ def extraer_features(gray):
 def obtener_caudal(timestamp):
     hora = timestamp.time()
 
-    if hora < datetime.strptime("16:57", "%H:%M").time():
+    if hora < datetime.strptime("13:52", "%H:%M").time():
         return 0.00
-    elif hora < datetime.strptime("17:13", "%H:%M").time():
+    elif hora < datetime.strptime("14:22", "%H:%M").time():
         return 0.05
-    elif hora < datetime.strptime("17:25", "%H:%M").time():
+    elif hora < datetime.strptime("14:40", "%H:%M").time():
+        return 0.07
+    elif hora < datetime.strptime("14:52", "%H:%M").time():
         return 0.10
-    elif hora < datetime.strptime("17:33", "%H:%M").time():
+    elif hora < datetime.strptime("15:03", "%H:%M").time():
         return 0.15
-    else:
+    elif hora < datetime.strptime("15:20", "%H:%M").time():
+        return 0.20
+    elif hora < datetime.strptime("15:28", "%H:%M").time():
         return 0.25
+    elif hora < datetime.strptime("15:30", "%H:%M").time():
+        return 0.28
+    elif hora < datetime.strptime("15:37", "%H:%M").time():
+        return 0.30
+    else:
+        return 0.10
 
 
 def put_text(img, text, org, scale=1.0, color=(0, 255, 255)):
@@ -135,7 +145,7 @@ resultados = []
 
 altura_filtrada = None
 
-cv2.namedWindow("Estimacion altura espuma II29P", cv2.WINDOW_NORMAL)
+cv2.namedWindow("Estimacion altura espuma II28P", cv2.WINDOW_NORMAL)
 
 for video_path in videos:
 
@@ -290,7 +300,7 @@ for video_path in videos:
         else:
             vis_show = vis
 
-        cv2.imshow("Estimacion altura espuma II29P", vis_show)
+        cv2.imshow("Estimacion altura espuma II28P", vis_show)
 
         key = cv2.waitKey(1) & 0xFF
 

@@ -9,14 +9,14 @@ from datetime import datetime, timedelta
 # CONFIGURACIÓN II29P
 # =========================================================
 
-CARPETA_VIDEOS = r"D:\MDT\Pruebas\II29P\1"
+CARPETA_VIDEOS = r"D:\MDT\Pruebas\II28P\1"
 
-CSV_DATOS = r"D:\MDT\II29P.xlsx"
+CSV_DATOS = r"D:\MDT\II28P.xlsx"
 
-SALIDA_DATASET = r"D:\MDT\Pruebas\II29P\1\dataset_features.csv"
+SALIDA_DATASET = r"D:\MDT\Pruebas\II28P\1\dataset_features.csv"
 
 # ROI fijo
-# Puedes cambiarlo si II29P tiene otro encuadre
+# Puedes cambiarlo si II28P tiene otro encuadre
 ROI = {
     "x": 435,
     "y": 736,
@@ -24,8 +24,8 @@ ROI = {
     "h": 398
 }
 
-TEMPERATURA_C = 1350
-EXPERIENCIA = 29
+TEMPERATURA_C = 1250
+EXPERIENCIA = 28
 
 # =========================================================
 # FUNCIONES
