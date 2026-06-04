@@ -26,7 +26,7 @@ os.add_dll_directory(
 CALIB_FILE = "stereo_calibration.npz"
 
 ANGULO_GRADOS = 3.47
-EXPOSICION_US = 28712
+EXPOSICION_US = 40
 
 NUM_DISPARIDADES = 64
 BLOCK_SIZE = 11
