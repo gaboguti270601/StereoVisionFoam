@@ -26,20 +26,36 @@ os.add_dll_directory(
 CALIB_FILE = "stereo_calibration.npz"
 
 ANGULO_GRADOS = 3.47
+
+# Exposición
+# 28712 us = 28.712 ms
+# 40 us = 0.04 ms
 EXPOSICION_US = 40
 
 NUM_DISPARIDADES = 64
 BLOCK_SIZE = 11
 
 # Baseline físico / baseline MATLAB
-# Baseline físico: 75 mm
-# Baseline MATLAB: 125.2247934179211 mm
 FACTOR_CORRECCION = 75.0 / 125.2247934179211
 
 FPS_OBJETIVO = 5
 FRAME_TIME = 1.0 / FPS_OBJETIVO
 
 VIDEO_CODEC = "mp4v"
+
+# =========================================================
+# MODO DE OPERACIÓN
+# =========================================================
+# False = modo seguro, muestra imagen real sin rectificar
+# True  = usa cv2.remap con calibración MATLAB
+# Como la rectificación está saliendo negra, dejar en False.
+USAR_RECTIFICACION = False
+
+# Si USAR_RECTIFICACION = False, normalmente no conviene rotar.
+ROTAR_FRAMES = False
+
+# Solo se usa si ROTAR_FRAMES = True
+ROTACION = cv2.ROTATE_90_COUNTERCLOCKWISE
 
 # =========================================================
 # ROI
@@ -72,7 +88,7 @@ estado = {
 }
 
 # =========================================================
-# TEXTO CON BORDE
+# TEXTO
 # =========================================================
 
 def put_text_outline(img, text, org, scale, color):
@@ -100,13 +116,13 @@ def put_text_outline(img, text, org, scale, color):
 
 
 # =========================================================
-# SELECCIÓN DE ROI
+# ROI
 # =========================================================
 
-def seleccionar_roi_en_vivo(rect_l):
+def seleccionar_roi_en_vivo(img):
     roi = cv2.selectROI(
         "Seleccionar ROI - superficie del fundido/espuma",
-        rect_l,
+        img,
         False
     )
 
@@ -125,7 +141,7 @@ def seleccionar_roi_en_vivo(rect_l):
 
 
 # =========================================================
-# CARGAR CALIBRACIÓN
+# CALIBRACIÓN
 # =========================================================
 
 def cargar_calibracion():
@@ -143,11 +159,16 @@ def cargar_calibracion():
     if "image_size" in data:
         print("image_size guardado:", data["image_size"])
 
+    if not USAR_RECTIFICACION:
+        print("\nMODO ACTUAL: SIN RECTIFICACIÓN")
+        print("Se mostrarán imágenes crudas de ambas cámaras.")
+        print("La estimación de profundidad será preliminar.")
+
     return data
 
 
 # =========================================================
-# INICIALIZAR CÁMARAS
+# CÁMARAS
 # =========================================================
 
 def inicializar_camaras():
@@ -175,7 +196,7 @@ def inicializar_camaras():
 
 
 # =========================================================
-# CAPTURAR FRAME
+# CAPTURA
 # =========================================================
 
 def capturar_frame(cam):
@@ -207,11 +228,13 @@ def capturar_frame(cam):
         cv2.NORM_MINMAX
     ).astype(np.uint8)
 
-    return cv2.cvtColor(img_8bit, cv2.COLOR_GRAY2BGR)
+    img_bgr = cv2.cvtColor(img_8bit, cv2.COLOR_GRAY2BGR)
+
+    return img_bgr
 
 
 # =========================================================
-# CALCULAR DISPARIDAD
+# DISPARIDAD
 # =========================================================
 
 def calcular_disparidad(img_l, img_r):
@@ -236,7 +259,7 @@ def calcular_disparidad(img_l, img_r):
 
 
 # =========================================================
-# DISPARIDAD A PROFUNDIDAD
+# PROFUNDIDAD
 # =========================================================
 
 def disparidad_a_profundidad(disp, Q):
@@ -254,7 +277,7 @@ def disparidad_a_profundidad(disp, Q):
 
 
 # =========================================================
-# DETECCIÓN AUTOMÁTICA DE SUPERFICIE
+# DETECCIÓN SUPERFICIE
 # =========================================================
 
 def detectar_superficie(gray):
@@ -285,7 +308,7 @@ def detectar_superficie(gray):
 
 
 # =========================================================
-# ESTIMAR ALTURA
+# ALTURA
 # =========================================================
 
 def estimar_altura(depth_roi, mask, z_ref):
@@ -306,7 +329,7 @@ def estimar_altura(depth_roi, mask, z_ref):
 
 
 # =========================================================
-# VISUALIZACIÓN MAPA DE PROFUNDIDAD
+# MAPA PROFUNDIDAD
 # =========================================================
 
 def visualizar_depth(depth):
@@ -337,7 +360,7 @@ def visualizar_depth(depth):
 
 
 # =========================================================
-# GRÁFICO EN TIEMPO REAL Y GUARDADO
+# GRÁFICO
 # =========================================================
 
 def hilo_grafico(grafico_path):
@@ -370,7 +393,7 @@ def hilo_grafico(grafico_path):
 
         return linea,
 
-    animation.FuncAnimation(
+    anim = animation.FuncAnimation(
         fig,
         update,
         interval=500,
@@ -379,7 +402,6 @@ def hilo_grafico(grafico_path):
 
     plt.show()
 
-    # Guardar gráfico al cerrar ventana
     with lock:
         if len(alturas) > 0:
             t = list(tiempos)
@@ -412,7 +434,7 @@ def hilo_grafico(grafico_path):
 
 
 # =========================================================
-# HILO PRINCIPAL DE CÁMARAS
+# HILO CÁMARAS
 # =========================================================
 
 def hilo_camaras(
@@ -445,7 +467,8 @@ def hilo_camaras(
         "altura_mm",
         "altura_cm",
         "z_ref_mm",
-        "z_superficie_mm"
+        "z_superficie_mm",
+        "modo_rectificacion"
     ])
 
     fourcc = cv2.VideoWriter_fourcc(*VIDEO_CODEC)
@@ -482,44 +505,67 @@ def hilo_camaras(
         if img_l is None or img_r is None:
             continue
 
-        # =================================================
-        # CHEQUEO DE RESOLUCIÓN
-        # =================================================
+        if frame_id == 0:
+            print("\n=== FRAME RAW ===")
+            print("img_l shape:", img_l.shape)
+            print("img_l min/max/mean:", img_l.min(), img_l.max(), np.mean(img_l))
+            print("img_r shape:", img_r.shape)
+            print("img_r min/max/mean:", img_r.min(), img_r.max(), np.mean(img_r))
 
-        h_img, w_img = img_l.shape[:2]
-
-        if map_l1.shape[:2] != (h_img, w_img):
-            print("\nERROR DE RESOLUCIÓN")
-            print("Frame shape:", img_l.shape)
-            print("map_l1 shape:", map_l1.shape)
-            print("El mapa de rectificación no coincide con el frame.")
-            break
+        if ROTAR_FRAMES:
+            img_l = cv2.rotate(img_l, ROTACION)
+            img_r = cv2.rotate(img_r, ROTACION)
 
         # =================================================
-        # RECTIFICACIÓN
+        # RECTIFICACIÓN OPCIONAL
         # =================================================
 
-        rect_l = cv2.remap(
-            img_l,
-            map_l1,
-            map_l2,
-            cv2.INTER_LINEAR
-        )
+        if USAR_RECTIFICACION:
 
-        rect_r = cv2.remap(
-            img_r,
-            map_r1,
-            map_r2,
-            cv2.INTER_LINEAR
-        )
+            h_img, w_img = img_l.shape[:2]
 
-        if rect_l.max() == 0 or rect_r.max() == 0:
-            print("\nADVERTENCIA: rectificación negra.")
-            print("Rect L min/max:", rect_l.min(), rect_l.max())
-            print("Rect R min/max:", rect_r.min(), rect_r.max())
+            if map_l1.shape[:2] != (h_img, w_img):
+                print("\nERROR DE RESOLUCIÓN")
+                print("Frame shape:", img_l.shape)
+                print("map_l1 shape:", map_l1.shape)
+                print("Se desactivará rectificación.")
+                rect_l = img_l.copy()
+                rect_r = img_r.copy()
+
+            else:
+                rect_l = cv2.remap(
+                    img_l,
+                    map_l1,
+                    map_l2,
+                    cv2.INTER_LINEAR
+                )
+
+                rect_r = cv2.remap(
+                    img_r,
+                    map_r1,
+                    map_r2,
+                    cv2.INTER_LINEAR
+                )
+
+                if rect_l.max() < 5 or rect_r.max() < 5:
+                    print("\nADVERTENCIA: rectificación casi negra.")
+                    print("Se usará imagen sin rectificar.")
+                    rect_l = img_l.copy()
+                    rect_r = img_r.copy()
+
+        else:
+            rect_l = img_l.copy()
+            rect_r = img_r.copy()
+
+        if frame_id == 0:
+            print("\n=== IMAGEN USADA ===")
+            print("rect_l shape:", rect_l.shape)
+            print("rect_l min/max/mean:", rect_l.min(), rect_l.max(), np.mean(rect_l))
+            print("rect_r shape:", rect_r.shape)
+            print("rect_r min/max/mean:", rect_r.min(), rect_r.max(), np.mean(rect_r))
 
         # =================================================
-        # SELECCIONAR ROI UNA SOLA VEZ
+        # SELECCIÓN ROI UNA SOLA VEZ
         # =================================================
 
         if USAR_ROI and not roi_data["seleccionado"]:
@@ -591,7 +637,7 @@ def hilo_camaras(
         z_superficie = None
 
         # =================================================
-        # CÁLCULO DE ALTURA
+        # CÁLCULO ALTURA
         # =================================================
 
         if estado["z_ref"] is not None:
@@ -623,16 +669,27 @@ def hilo_camaras(
                         h_val,
                         h_val / 10.0,
                         estado["z_ref"],
-                        z_superficie
+                        z_superficie,
+                        "rectificado" if USAR_RECTIFICACION else "sin_rectificacion"
                     ])
 
         # =================================================
         # OVERLAY
         # =================================================
 
+        titulo_1 = "Camara 1"
+        titulo_2 = "Camara 2"
+
+        if USAR_RECTIFICACION:
+            titulo_1 += " rectificada"
+            titulo_2 += " rectificada"
+        else:
+            titulo_1 += " sin rectificar"
+            titulo_2 += " sin rectificar"
+
         put_text_outline(
             display_l,
-            "Camara 1 rectificada",
+            titulo_1,
             (50, 80),
             1.3,
             (255, 255, 0)
@@ -640,7 +697,7 @@ def hilo_camaras(
 
         put_text_outline(
             display_r,
-            "Camara 2 rectificada",
+            titulo_2,
             (50, 80),
             1.3,
             (255, 255, 0)
@@ -689,7 +746,7 @@ def hilo_camaras(
             )
 
         # =================================================
-        # MOSTRAR VENTANAS
+        # MOSTRAR
         # =================================================
 
         combined = np.hstack([
@@ -700,11 +757,10 @@ def hilo_camaras(
         cv2.imshow("Camaras Estereo", combined)
 
         depth_color = visualizar_depth(depth)
-
         cv2.imshow("Mapa de Profundidad", depth_color)
 
         # =================================================
-        # GUARDAR VIDEO SOLO SI ESTÁ GRABANDO
+        # GUARDAR VIDEO
         # =================================================
 
         if estado["grabando"]:
