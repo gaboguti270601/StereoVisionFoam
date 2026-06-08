@@ -23,7 +23,7 @@ os.add_dll_directory(
 # PARÁMETROS GENERALES
 # =========================================================
 
-CALIB_FILE = "stereo_calibration.npz"
+CALIB_FILE = r"D:\MDT\Stereovision\calibration\stereo_calibration.npz"
 
 ANGULO_GRADOS = 3.47
 
