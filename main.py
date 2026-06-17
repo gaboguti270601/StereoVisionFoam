@@ -1,15 +1,16 @@
+
 import os
-import cv2
-import numpy as np
 import time
 import csv
 from datetime import datetime
-import matplotlib.pyplot as plt
-import matplotlib.animation as animation
 from collections import deque
-import threading
+
+import cv2
+import numpy as np
+
 
 cv2.startWindowThread()
+
 
 # =========================================================
 # DLL THORLABS
@@ -22,107 +23,108 @@ DLL_PATH = (
 
 os.add_dll_directory(DLL_PATH)
 
-# =========================================================
-# RUTAS
-# =========================================================
-
-CALIB_FILE = (
-    r"D:\MDT\Stereovision"
-    r"\calibration\stereo_calibration.npz"
-)
 
 # =========================================================
-# PARÁMETROS GENERALES
+# CONFIGURACIÓN GENERAL
 # =========================================================
 
-ANGULO_GRADOS = 3.47
+# Número de serie fijo para cada lado.
+# La cámara 36933 será siempre la izquierda (L / cámara 1).
+# La cámara 36930 será siempre la derecha (R / cámara 2).
+CAMARA_L_SERIAL = "36933"
+CAMARA_R_SERIAL = "36930"
 
-# Ya comprobaste que la imagen cruda se ve bien con 40 us.
+# Exposición usada actualmente.
 EXPOSICION_US = 40
 
-FPS_OBJETIVO = 5
+# Vista y videos a 30 FPS.
+FPS_OBJETIVO = 30.0
 FRAME_TIME = 1.0 / FPS_OBJETIVO
 
 VIDEO_CODEC = "mp4v"
 
-# =========================================================
-# PARÁMETROS ESTÉREO
-# =========================================================
+# Los videos se guardarán en 960 x 720 si la cámara entrega
+# imágenes con relación 4:3, como 1440 x 1080.
+ANCHO_VIDEO_SALIDA = 960
 
-NUM_DISPARIDADES = 64
-BLOCK_SIZE = 11
+# Tamaño aproximado de cada cámara en la ventana.
+ANCHO_VISTA_CAMARA = 640
 
-BASELINE_FISICO_MM = 75.0
-BASELINE_MATLAB_MM = 125.2247934179211
+# La cámara izquierda gira 1 vez las manecillas del reloj 90 grados
+ROTACION_L = cv2.ROTATE_90_CLOCKWISE
 
-FACTOR_CORRECCION = (
-    BASELINE_FISICO_MM / BASELINE_MATLAB_MM
-)
+# La cámara derecha gira 1 vez al contrario de las manecillas del reloj 90 grados
+ROTACION_R = cv2.ROTATE_90_COUNTERCLOCKWISE
 
-# =========================================================
-# RECTIFICACIÓN
-# =========================================================
+# Mostrar información solo en pantalla.
+# Los videos se guardan LIMPIOS, sin textos ni líneas.
+MOSTRAR_OVERLAY = True
 
-USAR_RECTIFICACION = True
+# Mostrar líneas horizontales solo en pantalla.
+MOSTRAR_LINEAS_HORIZONTALES = False
+SEPARACION_LINEAS_PX = 80
 
-# El programa probará automáticamente:
-# - sin rotación
-# - 90° antihorario
-# - 90° horario
-# - 180°
-SELECCIONAR_ROTACION_AUTOMATICA = True
+# Guardar CSV con información temporal de cada par grabado.
+GUARDAR_CSV = True
 
-# Solo se usa si SELECCIONAR_ROTACION_AUTOMATICA = False.
-ROTACION_MANUAL = cv2.ROTATE_90_COUNTERCLOCKWISE
+# Tiempo máximo para esperar un frame de cada cámara.
+TIMEOUT_FRAME_S = 1.0
 
-# Mínimo porcentaje de píxeles no negros para considerar
-# válida una imagen rectificada.
-MINIMO_PIXELES_NO_NEGROS = 0.01
-
-# Dibuja líneas horizontales para comprobar visualmente
-# la alineación epipolar.
-DIBUJAR_LINEAS_EPIPOLARES = True
-SEPARACION_LINEAS_PX = 100
 
 # =========================================================
-# ROI
+# ESTADO
 # =========================================================
-
-USAR_ROI = True
-
-roi_data = {
-    "seleccionado": False,
-    "x": 0,
-    "y": 0,
-    "w": 0,
-    "h": 0
-}
-
-# =========================================================
-# BUFFERS DEL GRÁFICO
-# =========================================================
-
-tiempos = deque(maxlen=300)
-alturas = deque(maxlen=300)
-
-lock = threading.Lock()
 
 estado = {
-    "grabando": False,
-    "z_ref": None,
     "activo": True,
-    "t_inicio": None,
-    "rectificacion_ok": False,
-    "rotacion_nombre": "sin determinar"
+    "grabando": False,
+    "t_inicio_grabacion": None,
+    "frame_global": 0,
+    "frame_grabado": 0,
 }
+
+# Para calcular FPS real de manera estable.
+historial_tiempos = deque(maxlen=60)
+
 
 # =========================================================
 # UTILIDADES
 # =========================================================
 
-def put_text_outline(img, text, org, scale, color):
+def aplicar_rotacion(img, lado):
     """
-    Escribe texto con borde negro para mejorar visibilidad.
+    Aplica la rotación correspondiente a cada cámara.
+
+    Cámara L:
+        sin rotación.
+
+    Cámara R:
+        rotación de 180 grados.
+    """
+
+    if lado == "L":
+        rotacion = ROTACION_L
+    elif lado == "R":
+        rotacion = ROTACION_R
+    else:
+        raise ValueError('lado debe ser "L" o "R".')
+
+    if rotacion is None:
+        return img.copy()
+
+    return cv2.rotate(img, rotacion)
+
+
+def put_text_outline(
+    img,
+    text,
+    org,
+    scale=0.65,
+    color=(255, 255, 255),
+    thickness=2,
+):
+    """
+    Dibuja texto legible con contorno negro.
     """
 
     cv2.putText(
@@ -132,8 +134,8 @@ def put_text_outline(img, text, org, scale, color):
         cv2.FONT_HERSHEY_SIMPLEX,
         scale,
         (0, 0, 0),
-        8,
-        cv2.LINE_AA
+        thickness + 4,
+        cv2.LINE_AA,
     )
 
     cv2.putText(
@@ -143,36 +145,41 @@ def put_text_outline(img, text, org, scale, color):
         cv2.FONT_HERSHEY_SIMPLEX,
         scale,
         color,
-        3,
-        cv2.LINE_AA
+        thickness,
+        cv2.LINE_AA,
     )
 
 
-def dibujar_lineas_horizontales(img, separacion=100):
+def dibujar_lineas_horizontales(
+    img,
+    separacion=80,
+):
     """
-    Dibuja líneas horizontales para revisar si puntos
-    correspondientes están en la misma fila.
+    Dibuja líneas horizontales solamente para visualización.
     """
 
-    resultado = img.copy()
-    h, w = resultado.shape[:2]
+    salida = img.copy()
+    h, w = salida.shape[:2]
 
     for y in range(0, h, separacion):
         cv2.line(
-            resultado,
+            salida,
             (0, y),
             (w - 1, y),
             (0, 255, 0),
-            1
+            1,
         )
 
-    return resultado
+    return salida
 
 
-def calcular_tamano_salida(img, ancho_salida=720):
+def calcular_tamano_con_ancho(
+    img,
+    ancho_salida,
+):
     """
-    Calcula un tamaño de video conservando la relación
-    de aspecto del frame procesado.
+    Calcula un tamaño manteniendo la relación de aspecto.
+    Fuerza dimensiones pares para VideoWriter.
     """
 
     h, w = img.shape[:2]
@@ -180,1680 +187,675 @@ def calcular_tamano_salida(img, ancho_salida=720):
     escala = ancho_salida / float(w)
     alto_salida = int(round(h * escala))
 
-    # VideoWriter funciona mejor con dimensiones pares.
+    if ancho_salida % 2 != 0:
+        ancho_salida += 1
+
     if alto_salida % 2 != 0:
         alto_salida += 1
 
-    return ancho_salida, alto_salida
+    return int(ancho_salida), int(alto_salida)
 
 
-def imagen_valida(img):
+def redimensionar_para_vista(
+    img,
+    ancho_salida,
+):
     """
-    Comprueba que una imagen rectificada no esté compuesta
-    casi completamente por píxeles negros.
-    """
-
-    if img is None or img.size == 0:
-        return False
-
-    gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
-
-    proporcion_no_negra = np.count_nonzero(gray > 2) / gray.size
-
-    return (
-        img.max() >= 5
-        and np.mean(img) > 0.1
-        and proporcion_no_negra >= MINIMO_PIXELES_NO_NEGROS
-    )
-
-
-def imprimir_estadisticas(nombre, img):
-    """
-    Imprime estadísticas básicas de una imagen.
+    Redimensiona una imagen para mostrarla en pantalla.
     """
 
-    gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
-
-    proporcion_no_negra = (
-        np.count_nonzero(gray > 2) / gray.size
-    )
-
-    print(f"\n{nombre}")
-    print("shape:", img.shape)
-    print("min:", int(img.min()))
-    print("max:", int(img.max()))
-    print("mean:", float(np.mean(img)))
-    print(
-        "píxeles no negros:",
-        f"{100.0 * proporcion_no_negra:.2f}%"
-    )
-
-
-# =========================================================
-# ROI
-# =========================================================
-
-def seleccionar_roi_en_vivo(img):
-    """
-    Permite seleccionar el ROI sobre la cámara izquierda
-    rectificada.
-    """
-
-    ventana = (
-        "Seleccionar ROI - superficie del fundido/espuma"
-    )
-
-    roi = cv2.selectROI(
-        ventana,
+    out_w, out_h = calcular_tamano_con_ancho(
         img,
-        showCrosshair=True,
-        fromCenter=False
+        ancho_salida,
     )
 
-    cv2.destroyWindow(ventana)
-
-    x, y, w, h = roi
-
-    if w == 0 or h == 0:
-        print("\nROI no seleccionado.")
-        return None
-
-    print("\nROI seleccionado:")
-    print(f"x={x}, y={y}, w={w}, h={h}")
-
-    return int(x), int(y), int(w), int(h)
+    return cv2.resize(
+        img,
+        (out_w, out_h),
+        interpolation=cv2.INTER_AREA,
+    )
 
 
-# =========================================================
-# CALIBRACIÓN
-# =========================================================
-
-def evaluar_mapas(map1, map2, nombre):
+def convertir_a_8bits_bgr(
+    image_buffer,
+    ancho,
+    alto,
+):
     """
-    Revisa qué porcentaje de coordenadas de los mapas cae
-    dentro de la imagen de origen.
+    Convierte el buffer monocromático de la cámara a BGR de 8 bits.
+
+    La normalización se hace de forma independiente para cada frame,
+    igual que en el código anterior.
     """
 
-    try:
-        map_x, map_y = cv2.convertMaps(
-            map1,
-            map2,
-            cv2.CV_32FC1
+    img_16 = np.array(
+        image_buffer,
+        dtype=np.uint16,
+    ).reshape(alto, ancho)
+
+    minimo = int(img_16.min())
+    maximo = int(img_16.max())
+
+    if maximo > minimo:
+        img_8 = cv2.normalize(
+            img_16,
+            None,
+            0,
+            255,
+            cv2.NORM_MINMAX,
+        ).astype(np.uint8)
+    else:
+        img_8 = np.zeros(
+            img_16.shape,
+            dtype=np.uint8,
         )
-    except cv2.error as error:
-        print(f"\nNo fue posible evaluar mapas {nombre}:")
-        print(error)
+
+    return cv2.cvtColor(
+        img_8,
+        cv2.COLOR_GRAY2BGR,
+    )
+
+
+def calcular_fps_real():
+    """
+    Calcula FPS real usando los últimos tiempos de captura.
+    """
+
+    ahora = time.perf_counter()
+    historial_tiempos.append(ahora)
+
+    if len(historial_tiempos) < 2:
         return 0.0
 
-    h, w = map_x.shape
-
-    validos = (
-        (map_x >= 0)
-        & (map_x < w)
-        & (map_y >= 0)
-        & (map_y < h)
-        & np.isfinite(map_x)
-        & np.isfinite(map_y)
+    intervalo = (
+        historial_tiempos[-1]
+        - historial_tiempos[0]
     )
 
-    porcentaje = (
-        100.0 * np.count_nonzero(validos) / validos.size
-    )
+    if intervalo <= 0:
+        return 0.0
 
-    print(f"\nMapas {nombre}:")
-    print("shape:", map_x.shape)
-    print(
-        "map_x min/max:",
-        float(np.nanmin(map_x)),
-        float(np.nanmax(map_x))
-    )
-    print(
-        "map_y min/max:",
-        float(np.nanmin(map_y)),
-        float(np.nanmax(map_y))
-    )
-    print(
-        "coordenadas dentro de la imagen:",
-        f"{porcentaje:.2f}%"
-    )
-
-    if porcentaje < 10:
-        print(
-            "ADVERTENCIA: casi todas las coordenadas "
-            "caen fuera de la imagen."
-        )
-    elif porcentaje < 50:
-        print(
-            "ADVERTENCIA: los mapas tienen cobertura baja."
-        )
-    else:
-        print("Cobertura geométrica razonable.")
-
-    return porcentaje
-
-
-def cargar_calibracion():
-    """
-    Carga y evalúa el archivo NPZ.
-    """
-
-    if not os.path.isfile(CALIB_FILE):
-        raise FileNotFoundError(
-            f"No existe el archivo:\n{CALIB_FILE}"
-        )
-
-    data = np.load(CALIB_FILE)
-
-    claves_necesarias = [
-        "K_l",
-        "D_l",
-        "K_r",
-        "D_r",
-        "R",
-        "T",
-        "Q",
-        "map_l1",
-        "map_l2",
-        "map_r1",
-        "map_r2"
-    ]
-
-    faltantes = [
-        clave
-        for clave in claves_necesarias
-        if clave not in data.files
-    ]
-
-    if faltantes:
-        raise KeyError(
-            "Faltan variables en la calibración: "
-            + ", ".join(faltantes)
-        )
-
-    baseline = float(np.linalg.norm(data["T"]))
-
-    print("\n===================================")
-    print("CALIBRACIÓN CARGADA")
-    print("===================================")
-
-    print("Archivo:", CALIB_FILE)
-    print("Variables:", data.files)
-
-    print("\nK_l:")
-    print(data["K_l"])
-
-    print("\nD_l:")
-    print(data["D_l"])
-
-    print("\nK_r:")
-    print(data["K_r"])
-
-    print("\nD_r:")
-    print(data["D_r"])
-
-    print("\nT:")
-    print(data["T"])
-
-    print(f"\nBaseline del NPZ: {baseline:.4f} mm")
-    print(
-        f"Factor de corrección: {FACTOR_CORRECCION:.6f}"
-    )
-
-    print("\nmap_l1 shape:", data["map_l1"].shape)
-    print("map_l2 shape:", data["map_l2"].shape)
-    print("map_r1 shape:", data["map_r1"].shape)
-    print("map_r2 shape:", data["map_r2"].shape)
-
-    if "image_size" in data.files:
-        print("image_size guardado:", data["image_size"])
-
-    evaluar_mapas(
-        data["map_l1"],
-        data["map_l2"],
-        "cámara izquierda"
-    )
-
-    evaluar_mapas(
-        data["map_r1"],
-        data["map_r2"],
-        "cámara derecha"
-    )
-
-    return data
+    return (
+        len(historial_tiempos) - 1
+    ) / intervalo
 
 
 # =========================================================
-# CÁMARAS
+# CÁMARAS THORLABS
 # =========================================================
 
 def inicializar_camaras():
     """
-    Detecta, abre y configura las dos cámaras.
+    Detecta y configura las dos cámaras por número de serie.
+
+    Asignación fija:
+        36933 -> cámara izquierda (L / cámara 1)
+        36930 -> cámara derecha (R / cámara 2)
+
+    No depende del orden en que Windows o el SDK detecten las cámaras.
     """
 
     from thorlabs_tsi_sdk.tl_camera import (
         TLCameraSDK,
-        OPERATION_MODE
+        OPERATION_MODE,
     )
 
     sdk = TLCameraSDK()
-    camaras = sdk.discover_available_cameras()
+    seriales_detectados = list(
+        sdk.discover_available_cameras()
+    )
 
     print("\n===================================")
     print("CÁMARAS DETECTADAS")
     print("===================================")
-    print(camaras)
+    print(seriales_detectados)
 
-    if len(camaras) < 2:
-        sdk.dispose()
-        raise RuntimeError(
-            "No se detectaron dos cámaras Thorlabs."
+    faltantes = []
+
+    if CAMARA_L_SERIAL not in seriales_detectados:
+        faltantes.append(
+            f"L={CAMARA_L_SERIAL}"
         )
 
-    cam_l = sdk.open_camera(camaras[0])
-    cam_r = sdk.open_camera(camaras[1])
+    if CAMARA_R_SERIAL not in seriales_detectados:
+        faltantes.append(
+            f"R={CAMARA_R_SERIAL}"
+        )
+
+    if faltantes:
+        sdk.dispose()
+
+        raise RuntimeError(
+            "No se encontraron las cámaras requeridas: "
+            + ", ".join(faltantes)
+            + f". Detectadas: {seriales_detectados}"
+        )
+
+    # Se abren explícitamente por número de serie.
+    cam_l = sdk.open_camera(
+        CAMARA_L_SERIAL
+    )
+
+    cam_r = sdk.open_camera(
+        CAMARA_R_SERIAL
+    )
 
     for cam in (cam_l, cam_r):
         cam.exposure_time_us = EXPOSICION_US
+
         cam.frames_per_trigger_zero_for_unlimited = 0
+
         cam.operation_mode = (
             OPERATION_MODE.SOFTWARE_TRIGGERED
         )
+
         cam.arm(2)
 
+    print("\nAsignación fija:")
     print(
-        f"\nExposición configurada: "
-        f"{EXPOSICION_US} us"
+        "Cámara L / cámara 1:",
+        CAMARA_L_SERIAL,
+    )
+    print(
+        "Cámara R / cámara 2:",
+        CAMARA_R_SERIAL,
     )
 
+    print("\nConfiguración:")
+    print("Exposición:", EXPOSICION_US, "us")
+    print("FPS objetivo:", FPS_OBJETIVO)
+
     print(
-        "Resolución cámara L:",
+        "Resolución L:",
         cam_l.image_width_pixels,
         "x",
-        cam_l.image_height_pixels
+        cam_l.image_height_pixels,
     )
 
     print(
-        "Resolución cámara R:",
+        "Resolución R:",
         cam_r.image_width_pixels,
         "x",
-        cam_r.image_height_pixels
+        cam_r.image_height_pixels,
     )
+
+    print("Rotación L:", ROTACION_L)
+    print("Rotación R:", ROTACION_R)
 
     return sdk, cam_l, cam_r
 
 
-# =========================================================
-# CAPTURA
-# =========================================================
-
-def capturar_frame(cam):
+def esperar_frame(cam):
     """
-    Captura un frame y lo convierte a 8 bits BGR.
+    Espera un frame y lo convierte a BGR.
     """
 
-    frame = None
-    tiempo_limite = time.time() + 2.0
+    limite = time.perf_counter() + TIMEOUT_FRAME_S
 
-    while frame is None and time.time() < tiempo_limite:
+    while time.perf_counter() < limite:
+        frame = cam.get_pending_frame_or_null()
+
+        if frame is not None:
+            return convertir_a_8bits_bgr(
+                frame.image_buffer,
+                cam.image_width_pixels,
+                cam.image_height_pixels,
+            )
+
+        time.sleep(0.0005)
+
+    return None
+
+
+def limpiar_frames_pendientes(cam):
+    """
+    Elimina frames antiguos del buffer para reducir latencia.
+    Conserva el frame más reciente disponible.
+    """
+
+    ultimo = None
+
+    while True:
         frame = cam.get_pending_frame_or_null()
 
         if frame is None:
-            time.sleep(0.001)
+            break
 
-    if frame is None:
+        ultimo = frame
+
+    if ultimo is None:
         return None
 
-    w = cam.image_width_pixels
-    h = cam.image_height_pixels
-
-    img = np.array(
-        frame.image_buffer,
-        dtype=np.uint16
-    ).reshape(h, w)
-
-    # Conversión para visualización/procesamiento.
-    # Se usa el mismo procedimiento en ambas cámaras.
-    minimo = int(img.min())
-    maximo = int(img.max())
-
-    if maximo > minimo:
-        img_8bit = cv2.normalize(
-            img,
-            None,
-            0,
-            255,
-            cv2.NORM_MINMAX
-        ).astype(np.uint8)
-    else:
-        img_8bit = np.zeros(
-            img.shape,
-            dtype=np.uint8
-        )
-
-    return cv2.cvtColor(
-        img_8bit,
-        cv2.COLOR_GRAY2BGR
+    return convertir_a_8bits_bgr(
+        ultimo.image_buffer,
+        cam.image_width_pixels,
+        cam.image_height_pixels,
     )
 
 
 # =========================================================
-# ROTACIÓN Y RECTIFICACIÓN
+# ARCHIVOS DE SALIDA
 # =========================================================
 
-def aplicar_rotacion(img, rotacion):
+def crear_rutas(experimento):
     """
-    Aplica una rotación OpenCV o devuelve copia sin rotar.
+    Crea las rutas de salida en la carpeta actual.
     """
 
-    if rotacion is None:
-        return img.copy()
+    base_dir = os.getcwd()
 
-    return cv2.rotate(img, rotacion)
+    return {
+        "video_l": os.path.join(
+            base_dir,
+            f"{experimento}_cam1.mp4",
+        ),
+        "video_r": os.path.join(
+            base_dir,
+            f"{experimento}_cam2.mp4",
+        ),
+        "csv": os.path.join(
+            base_dir,
+            f"{experimento}_captura.csv",
+        ),
+    }
 
 
-def seleccionar_mejor_rotacion(
-    img_l,
-    img_r,
-    map_l1,
-    map_l2,
-    map_r1,
-    map_r2
+def abrir_writers(
+    rutas,
+    frame_l,
 ):
     """
-    Prueba todas las orientaciones compatibles y elige la
-    que produzca mayor proporción de imagen rectificada útil.
+    Abre VideoWriter a 30 FPS.
+
+    Los videos se guardan sin overlays para que luego puedan
+    usarse en el procesamiento offline.
     """
 
-    candidatos = [
-        ("sin_rotar", None),
-        (
-            "90_antihorario",
-            cv2.ROTATE_90_COUNTERCLOCKWISE
-        ),
-        (
-            "90_horario",
-            cv2.ROTATE_90_CLOCKWISE
-        ),
-        ("180_grados", cv2.ROTATE_180)
-    ]
+    out_w, out_h = calcular_tamano_con_ancho(
+        frame_l,
+        ANCHO_VIDEO_SALIDA,
+    )
 
-    mejor = None
+    fourcc = cv2.VideoWriter_fourcc(
+        *VIDEO_CODEC
+    )
 
-    print("\n===================================")
-    print("PRUEBA AUTOMÁTICA DE ROTACIÓN")
-    print("===================================")
+    writer_l = cv2.VideoWriter(
+        rutas["video_l"],
+        fourcc,
+        FPS_OBJETIVO,
+        (out_w, out_h),
+    )
 
-    for nombre, rotacion in candidatos:
-        prueba_l = aplicar_rotacion(img_l, rotacion)
-        prueba_r = aplicar_rotacion(img_r, rotacion)
+    writer_r = cv2.VideoWriter(
+        rutas["video_r"],
+        fourcc,
+        FPS_OBJETIVO,
+        (out_w, out_h),
+    )
 
-        print(f"\nCandidato: {nombre}")
-        print("Frame:", prueba_l.shape[:2])
-        print("Mapa:", map_l1.shape[:2])
-
-        if prueba_l.shape[:2] != map_l1.shape[:2]:
-            print("No coincide con la resolución del mapa.")
-            continue
-
-        rect_l = cv2.remap(
-            prueba_l,
-            map_l1,
-            map_l2,
-            cv2.INTER_LINEAR,
-            borderMode=cv2.BORDER_CONSTANT,
-            borderValue=0
-        )
-
-        rect_r = cv2.remap(
-            prueba_r,
-            map_r1,
-            map_r2,
-            cv2.INTER_LINEAR,
-            borderMode=cv2.BORDER_CONSTANT,
-            borderValue=0
-        )
-
-        gray_l = cv2.cvtColor(
-            rect_l,
-            cv2.COLOR_BGR2GRAY
-        )
-
-        gray_r = cv2.cvtColor(
-            rect_r,
-            cv2.COLOR_BGR2GRAY
-        )
-
-        proporcion_l = (
-            np.count_nonzero(gray_l > 2) / gray_l.size
-        )
-
-        proporcion_r = (
-            np.count_nonzero(gray_r > 2) / gray_r.size
-        )
-
-        score = (
-            proporcion_l
-            + proporcion_r
-            + np.mean(gray_l) / 255.0
-            + np.mean(gray_r) / 255.0
-        )
-
-        print(
-            "Píxeles útiles L:",
-            f"{100.0 * proporcion_l:.2f}%"
-        )
-
-        print(
-            "Píxeles útiles R:",
-            f"{100.0 * proporcion_r:.2f}%"
-        )
-
-        print("Score:", float(score))
-
-        if mejor is None or score > mejor["score"]:
-            mejor = {
-                "nombre": nombre,
-                "rotacion": rotacion,
-                "score": score,
-                "rect_l": rect_l,
-                "rect_r": rect_r
-            }
-
-    if mejor is None:
+    if not writer_l.isOpened():
         raise RuntimeError(
-            "Ninguna orientación coincide con "
-            "la resolución de los mapas."
+            "No se pudo abrir el video de la cámara izquierda."
         )
 
-    print("\nRotación seleccionada:")
-    print(mejor["nombre"])
-    print("Score:", mejor["score"])
+    if not writer_r.isOpened():
+        writer_l.release()
 
-    return mejor["rotacion"], mejor["nombre"]
+        raise RuntimeError(
+            "No se pudo abrir el video de la cámara derecha."
+        )
+
+    print("\nVideos configurados:")
+    print("Tamaño:", out_w, "x", out_h)
+    print("FPS guardado:", FPS_OBJETIVO)
+    print("Cámara L:", rutas["video_l"])
+    print("Cámara R:", rutas["video_r"])
+    print(
+        "Los videos se guardarán en mp4 sin overlays, para procesamiento offline."
+    )
+
+    return writer_l, writer_r, out_w, out_h
 
 
-def rectificar_par(
+# =========================================================
+# VISUALIZACIÓN
+# =========================================================
+
+def crear_vista(
     img_l,
     img_r,
-    rotacion,
-    map_l1,
-    map_l2,
-    map_r1,
-    map_r2
+    fps_real,
 ):
     """
-    Rota y rectifica un par de imágenes.
+    Genera la vista combinada para pantalla.
+    Los overlays no se guardan en los videos.
     """
 
-    img_l_rot = aplicar_rotacion(img_l, rotacion)
-    img_r_rot = aplicar_rotacion(img_r, rotacion)
+    vista_l = img_l.copy()
+    vista_r = img_r.copy()
 
-    if img_l_rot.shape[:2] != map_l1.shape[:2]:
-        return (
-            img_l_rot,
-            img_r_rot,
-            None,
-            None,
-            False
+    if MOSTRAR_OVERLAY:
+        put_text_outline(
+            vista_l,
+            "Camara 1 - RAW",
+            (25, 40),
+            0.75,
+            (255, 255, 0),
         )
 
-    rect_l = cv2.remap(
-        img_l_rot,
-        map_l1,
-        map_l2,
-        cv2.INTER_LINEAR,
-        borderMode=cv2.BORDER_CONSTANT,
-        borderValue=0
-    )
-
-    rect_r = cv2.remap(
-        img_r_rot,
-        map_r1,
-        map_r2,
-        cv2.INTER_LINEAR,
-        borderMode=cv2.BORDER_CONSTANT,
-        borderValue=0
-    )
-
-    ok = (
-        imagen_valida(rect_l)
-        and imagen_valida(rect_r)
-    )
-
-    return (
-        img_l_rot,
-        img_r_rot,
-        rect_l,
-        rect_r,
-        ok
-    )
-
-
-# =========================================================
-# DISPARIDAD
-# =========================================================
-
-def crear_matcher_estereo():
-    """
-    Crea el objeto StereoSGBM una sola vez.
-    """
-
-    return cv2.StereoSGBM_create(
-        minDisparity=0,
-        numDisparities=NUM_DISPARIDADES,
-        blockSize=BLOCK_SIZE,
-        P1=8 * BLOCK_SIZE**2,
-        P2=32 * BLOCK_SIZE**2,
-        disp12MaxDiff=1,
-        preFilterCap=31,
-        uniquenessRatio=10,
-        speckleWindowSize=100,
-        speckleRange=2,
-        mode=cv2.STEREO_SGBM_MODE_SGBM_3WAY
-    )
-
-
-def calcular_disparidad(stereo, img_l, img_r):
-    """
-    Calcula disparidad sobre imágenes rectificadas.
-    """
-
-    gray_l = cv2.cvtColor(
-        img_l,
-        cv2.COLOR_BGR2GRAY
-    )
-
-    gray_r = cv2.cvtColor(
-        img_r,
-        cv2.COLOR_BGR2GRAY
-    )
-
-    disp = stereo.compute(
-        gray_l,
-        gray_r
-    ).astype(np.float32) / 16.0
-
-    return disp
-
-
-# =========================================================
-# PROFUNDIDAD
-# =========================================================
-
-def disparidad_a_profundidad(disp, Q):
-    """
-    Reproyecta la disparidad a coordenadas 3D.
-    """
-
-    puntos_3d = cv2.reprojectImageTo3D(
-        disp,
-        Q
-    )
-
-    depth = puntos_3d[:, :, 2].astype(np.float32)
-
-    invalidos = (
-        ~np.isfinite(depth)
-        | (disp <= 0)
-        | (depth < 100)
-        | (depth > 3000)
-    )
-
-    depth[invalidos] = np.nan
-
-    return depth
-
-
-# =========================================================
-# DETECCIÓN DE SUPERFICIE
-# =========================================================
-
-def detectar_superficie(gray):
-    """
-    Segmentación inicial de la superficie mediante Otsu.
-    """
-
-    blur = cv2.GaussianBlur(
-        gray,
-        (5, 5),
-        0
-    )
-
-    _, mask = cv2.threshold(
-        blur,
-        0,
-        255,
-        cv2.THRESH_BINARY + cv2.THRESH_OTSU
-    )
-
-    kernel = np.ones(
-        (5, 5),
-        dtype=np.uint8
-    )
-
-    mask = cv2.morphologyEx(
-        mask,
-        cv2.MORPH_OPEN,
-        kernel
-    )
-
-    mask = cv2.morphologyEx(
-        mask,
-        cv2.MORPH_CLOSE,
-        kernel
-    )
-
-    return mask
-
-
-# =========================================================
-# ALTURA
-# =========================================================
-
-def obtener_profundidad_superficie(depth_roi, mask):
-    """
-    Obtiene la profundidad mediana de la superficie
-    segmentada.
-    """
-
-    validos = (
-        (mask > 0)
-        & np.isfinite(depth_roi)
-    )
-
-    cantidad = int(np.count_nonzero(validos))
-
-    if cantidad < 50:
-        return None, cantidad
-
-    z_superficie = float(
-        np.nanmedian(depth_roi[validos])
-    )
-
-    return z_superficie, cantidad
-
-
-def estimar_altura(z_superficie, z_ref):
-    """
-    Calcula el cambio de altura respecto a la referencia.
-    """
-
-    altura_mm = (
-        abs(z_ref - z_superficie)
-        * np.cos(np.radians(ANGULO_GRADOS))
-        * FACTOR_CORRECCION
-    )
-
-    return float(altura_mm)
-
-
-# =========================================================
-# VISUALIZACIÓN DE PROFUNDIDAD
-# =========================================================
-
-def visualizar_depth(depth):
-    """
-    Convierte un mapa de profundidad en una imagen coloreada.
-    """
-
-    if depth is None:
-        return np.zeros(
-            (480, 640, 3),
-            dtype=np.uint8
+        put_text_outline(
+            vista_r,
+            "Camara 2 - RAW - rotada 180",
+            (25, 40),
+            0.75,
+            (255, 255, 0),
         )
 
-    depth_vis = depth.copy()
-    validos = np.isfinite(depth_vis)
-
-    if not np.any(validos):
-        resultado = np.zeros(
-            depth_vis.shape,
-            dtype=np.uint8
+        put_text_outline(
+            vista_l,
+            f"FPS real: {fps_real:.1f}",
+            (25, 80),
+            0.65,
+            (
+                (0, 255, 0)
+                if fps_real >= 27.0
+                else (0, 165, 255)
+            ),
         )
 
-        return cv2.applyColorMap(
-            resultado,
-            cv2.COLORMAP_JET
+        put_text_outline(
+            vista_l,
+            f"Frame: {estado['frame_global']}",
+            (25, 120),
+            0.65,
+            (255, 255, 255),
         )
 
-    minimo = np.percentile(
-        depth_vis[validos],
-        5
-    )
-
-    maximo = np.percentile(
-        depth_vis[validos],
-        95
-    )
-
-    if maximo <= minimo:
-        normalizada = np.zeros(
-            depth_vis.shape,
-            dtype=np.uint8
-        )
-    else:
-        recortada = np.clip(
-            depth_vis,
-            minimo,
-            maximo
+        put_text_outline(
+            vista_l,
+            "G: grabar | S: detener | Q: salir",
+            (25, 160),
+            0.55,
+            (230, 230, 230),
         )
 
-        recortada = (
-            recortada - minimo
-        ) / (
-            maximo - minimo
-        )
-
-        recortada = np.nan_to_num(
-            recortada,
-            nan=0.0,
-            posinf=0.0,
-            neginf=0.0
-        )
-
-        normalizada = (
-            recortada * 255
-        ).astype(np.uint8)
-
-    return cv2.applyColorMap(
-        normalizada,
-        cv2.COLORMAP_JET
-    )
-
-
-# =========================================================
-# GRÁFICO
-# =========================================================
-
-def hilo_grafico(grafico_path):
-    """
-    Muestra y guarda el gráfico de altura.
-    """
-
-    fig, ax = plt.subplots()
-
-    linea, = ax.plot(
-        [],
-        [],
-        label="Altura espuma"
-    )
-
-    punto, = ax.plot([], [], "ro")
-
-    texto = ax.text(
-        0.02,
-        0.95,
-        "",
-        transform=ax.transAxes
-    )
-
-    ax.set_xlabel("Tiempo [s]")
-    ax.set_ylabel("Altura espuma [mm]")
-    ax.set_title(
-        "Altura de espuma en tiempo real"
-    )
-    ax.grid(True)
-    ax.legend()
-
-    def actualizar(_):
-        if not estado["activo"]:
-            plt.close(fig)
-            return linea, punto, texto
-
-        with lock:
-            if len(alturas) == 0:
-                return linea, punto, texto
-
-            t = list(tiempos)
-            h = list(alturas)
-
-        linea.set_data(t, h)
-        punto.set_data([t[-1]], [h[-1]])
-        texto.set_text(f"{h[-1]:.2f} mm")
-
-        ax.set_xlim(
-            max(0, t[-1] - 60),
-            t[-1] + 1
-        )
-
-        limite_superior = max(
-            max(h) * 1.2,
-            10
-        )
-
-        ax.set_ylim(0, limite_superior)
-
-        return linea, punto, texto
-
-    anim = animation.FuncAnimation(
-        fig,
-        actualizar,
-        interval=500,
-        cache_frame_data=False
-    )
-
-    plt.show()
-
-    with lock:
-        if len(alturas) == 0:
-            print(
-                "\nNo se guardó gráfico porque "
-                "no existen datos de altura."
+        if estado["grabando"]:
+            tiempo_grabacion = (
+                time.perf_counter()
+                - estado["t_inicio_grabacion"]
             )
-            return
 
-        t = list(tiempos)
-        h = list(alturas)
+            put_text_outline(
+                vista_l,
+                "REC",
+                (25, 210),
+                1.0,
+                (0, 0, 255),
+            )
 
-    fig_save, ax_save = plt.subplots()
+            put_text_outline(
+                vista_l,
+                f"Grabacion: {tiempo_grabacion:.1f} s",
+                (25, 250),
+                0.65,
+                (0, 0, 255),
+            )
 
-    ax_save.plot(
-        t,
-        h,
-        label="Altura espuma"
+    if MOSTRAR_LINEAS_HORIZONTALES:
+        vista_l = dibujar_lineas_horizontales(
+            vista_l,
+            SEPARACION_LINEAS_PX,
+        )
+
+        vista_r = dibujar_lineas_horizontales(
+            vista_r,
+            SEPARACION_LINEAS_PX,
+        )
+
+    vista_l = redimensionar_para_vista(
+        vista_l,
+        ANCHO_VISTA_CAMARA,
     )
 
-    ax_save.scatter(
-        t[-1],
-        h[-1]
+    vista_r = redimensionar_para_vista(
+        vista_r,
+        ANCHO_VISTA_CAMARA,
     )
 
-    ax_save.set_xlabel("Tiempo [s]")
-    ax_save.set_ylabel("Altura espuma [mm]")
-    ax_save.set_title(
-        "Altura de espuma medida por estereovisión"
-    )
-    ax_save.grid(True)
-    ax_save.legend()
+    if vista_l.shape[:2] != vista_r.shape[:2]:
+        vista_r = cv2.resize(
+            vista_r,
+            (
+                vista_l.shape[1],
+                vista_l.shape[0],
+            ),
+            interpolation=cv2.INTER_AREA,
+        )
 
-    fig_save.savefig(
-        grafico_path,
-        dpi=300,
-        bbox_inches="tight"
-    )
-
-    plt.close(fig_save)
-
-    print("\nGráfico guardado en:")
-    print(grafico_path)
+    return np.hstack([
+        vista_l,
+        vista_r,
+    ])
 
 
 # =========================================================
-# HILO PRINCIPAL DE CÁMARAS
+# BUCLE PRINCIPAL
 # =========================================================
 
-def hilo_camaras(
-    cal,
+def ejecutar_captura(
     sdk,
     cam_l,
     cam_r,
-    csv_path,
-    video_l_path,
-    video_r_path
+    rutas,
 ):
-    global USAR_ROI
+    """
+    Captura, muestra y guarda ambos videos.
 
-    Q = cal["Q"]
+    No usa calibración.
+    No rectifica.
+    No calcula profundidad.
+    """
 
-    map_l1 = cal["map_l1"]
-    map_l2 = cal["map_l2"]
-    map_r1 = cal["map_r1"]
-    map_r2 = cal["map_r2"]
-
-    stereo = crear_matcher_estereo()
-
-    cv2.namedWindow(
-        "Camaras Estereo",
-        cv2.WINDOW_NORMAL
-    )
-
-    cv2.namedWindow(
-        "Mapa de Profundidad",
-        cv2.WINDOW_NORMAL
-    )
-
+    writer_l = None
+    writer_r = None
     csv_file = None
-    video_l = None
-    video_r = None
+    csv_writer = None
 
-    rotacion = None
-    rotacion_seleccionada = False
+    out_w = None
+    out_h = None
 
-    diagnostico_impreso = False
+    cv2.namedWindow(
+        "Camaras Estereo RAW",
+        cv2.WINDOW_NORMAL,
+    )
 
     try:
-        csv_file = open(
-            csv_path,
-            "w",
-            newline="",
-            encoding="utf-8"
+        if GUARDAR_CSV:
+            csv_file = open(
+                rutas["csv"],
+                "w",
+                newline="",
+                encoding="utf-8",
+            )
+
+            csv_writer = csv.writer(csv_file)
+
+            csv_writer.writerow([
+                "frame_global",
+                "frame_grabado",
+                "timestamp",
+                "tiempo_grabacion_s",
+                "fps_real",
+                "fps_objetivo",
+                "exposicion_us",
+            ])
+
+        # Un disparo inicial inicia la adquisición continua,
+        # igual que en tu configuración anterior.
+        cam_l.issue_software_trigger()
+        cam_r.issue_software_trigger()
+
+        print("\n===================================")
+        print("CONTROLES")
+        print("===================================")
+        print("G: iniciar grabación")
+        print("S: detener grabación")
+        print("Q: salir")
+        print(
+            "\nLa pantalla intenta actualizarse a 30 FPS. "
+            "El FPS real aparece en la ventana."
         )
-
-        writer = csv.writer(csv_file)
-
-        writer.writerow([
-            "timestamp",
-            "tiempo_s",
-            "altura_mm",
-            "altura_cm",
-            "z_ref_mm",
-            "z_superficie_mm",
-            "rectificacion_ok",
-            "rotacion"
-        ])
-
-        fourcc = cv2.VideoWriter_fourcc(
-            *VIDEO_CODEC
-        )
-
-        frame_id = 0
 
         while estado["activo"]:
-            tiempo_frame_inicio = time.time()
+            inicio_ciclo = time.perf_counter()
 
-            cam_l.issue_software_trigger()
-            cam_r.issue_software_trigger()
+            # Leer el frame más reciente disponible.
+            img_l_raw = limpiar_frames_pendientes(cam_l)
+            img_r_raw = limpiar_frames_pendientes(cam_r)
 
-            img_l_raw = capturar_frame(cam_l)
-            img_r_raw = capturar_frame(cam_r)
+            # Si todavía no había frame pendiente, esperar uno.
+            if img_l_raw is None:
+                img_l_raw = esperar_frame(cam_l)
+
+            if img_r_raw is None:
+                img_r_raw = esperar_frame(cam_r)
 
             if img_l_raw is None or img_r_raw is None:
                 print(
-                    "No fue posible obtener "
-                    "un par de frames."
+                    "No se pudo obtener un par de frames."
                 )
                 continue
 
-            if frame_id == 0:
-                imprimir_estadisticas(
-                    "Frame RAW izquierdo",
-                    img_l_raw
-                )
-
-                imprimir_estadisticas(
-                    "Frame RAW derecho",
-                    img_r_raw
-                )
-
-            # =============================================
-            # DETERMINAR ROTACIÓN
-            # =============================================
-
-            if not rotacion_seleccionada:
-                if SELECCIONAR_ROTACION_AUTOMATICA:
-                    rotacion, nombre_rotacion = (
-                        seleccionar_mejor_rotacion(
-                            img_l_raw,
-                            img_r_raw,
-                            map_l1,
-                            map_l2,
-                            map_r1,
-                            map_r2
-                        )
-                    )
-                else:
-                    rotacion = ROTACION_MANUAL
-                    nombre_rotacion = "manual"
-
-                estado["rotacion_nombre"] = (
-                    nombre_rotacion
-                )
-
-                rotacion_seleccionada = True
-
-            # =============================================
-            # RECTIFICAR
-            # =============================================
-
-            if USAR_RECTIFICACION:
-                (
-                    img_l_rot,
-                    img_r_rot,
-                    rect_l,
-                    rect_r,
-                    rectificacion_ok
-                ) = rectificar_par(
-                    img_l_raw,
-                    img_r_raw,
-                    rotacion,
-                    map_l1,
-                    map_l2,
-                    map_r1,
-                    map_r2
-                )
-            else:
-                img_l_rot = aplicar_rotacion(
-                    img_l_raw,
-                    rotacion
-                )
-
-                img_r_rot = aplicar_rotacion(
-                    img_r_raw,
-                    rotacion
-                )
-
-                rect_l = img_l_rot.copy()
-                rect_r = img_r_rot.copy()
-
-                rectificacion_ok = False
-
-            estado["rectificacion_ok"] = (
-                rectificacion_ok
+            # Orientación real del montaje:
+            # L sin rotar, R rotada 180°.
+            img_l = aplicar_rotacion(
+                img_l_raw,
+                "L",
             )
 
-            if not diagnostico_impreso:
-                print("\n===================================")
-                print("DIAGNÓSTICO DEL PRIMER FRAME")
-                print("===================================")
+            img_r = aplicar_rotacion(
+                img_r_raw,
+                "R",
+            )
 
-                print(
-                    "Rotación:",
-                    estado["rotacion_nombre"]
-                )
+            fps_real = calcular_fps_real()
 
-                imprimir_estadisticas(
-                    "Frame rotado izquierdo",
-                    img_l_rot
-                )
-
-                imprimir_estadisticas(
-                    "Frame rotado derecho",
-                    img_r_rot
-                )
-
-                if rect_l is not None:
-                    imprimir_estadisticas(
-                        "Frame rectificado izquierdo",
-                        rect_l
-                    )
-
-                if rect_r is not None:
-                    imprimir_estadisticas(
-                        "Frame rectificado derecho",
-                        rect_r
-                    )
-
-                print(
-                    "\nRectificación válida:",
-                    rectificacion_ok
-                )
-
-                if not rectificacion_ok:
-                    print(
-                        "\nLa adquisición funciona, "
-                        "pero los mapas de rectificación "
-                        "no generan imágenes utilizables."
-                    )
-
-                    print(
-                        "No se calculará profundidad ni "
-                        "altura mientras esto ocurra."
-                    )
-
-                diagnostico_impreso = True
-
-            # =============================================
-            # IMÁGENES PARA VISUALIZAR
-            # =============================================
-
-            if (
-                USAR_RECTIFICACION
-                and rectificacion_ok
-            ):
-                procesada_l = rect_l
-                procesada_r = rect_r
-                modo_texto = "RECTIFICADA"
-            else:
-                # Se muestran imágenes crudas/rotadas para
-                # no dejar la ventana completamente negra.
-                procesada_l = img_l_rot
-                procesada_r = img_r_rot
-                modo_texto = (
-                    "RAW - RECTIFICACION FALLIDA"
-                    if USAR_RECTIFICACION
-                    else "SIN RECTIFICAR"
-                )
-
-            # =============================================
-            # INICIALIZAR VIDEO WRITERS
-            # =============================================
-
-            if video_l is None or video_r is None:
-                out_w, out_h = calcular_tamano_salida(
-                    procesada_l,
-                    ancho_salida=720
-                )
-
-                video_l = cv2.VideoWriter(
-                    video_l_path,
-                    fourcc,
-                    FPS_OBJETIVO,
-                    (out_w, out_h)
-                )
-
-                video_r = cv2.VideoWriter(
-                    video_r_path,
-                    fourcc,
-                    FPS_OBJETIVO,
-                    (out_w, out_h)
-                )
-
-                if not video_l.isOpened():
-                    raise RuntimeError(
-                        "No se pudo abrir el video "
-                        "de la cámara izquierda."
-                    )
-
-                if not video_r.isOpened():
-                    raise RuntimeError(
-                        "No se pudo abrir el video "
-                        "de la cámara derecha."
-                    )
-
-                print(
-                    "\nTamaño de videos:",
-                    out_w,
-                    "x",
-                    out_h
-                )
-
-            # =============================================
-            # ROI
-            # =============================================
-
-            if (
-                USAR_ROI
-                and not roi_data["seleccionado"]
-                and rectificacion_ok
-            ):
-                roi = seleccionar_roi_en_vivo(
-                    procesada_l
-                )
-
-                if roi is not None:
-                    (
-                        roi_data["x"],
-                        roi_data["y"],
-                        roi_data["w"],
-                        roi_data["h"]
-                    ) = roi
-
-                    roi_data["seleccionado"] = True
-                else:
-                    USAR_ROI = False
-
-            # =============================================
-            # DISPARIDAD Y PROFUNDIDAD
-            # =============================================
-
-            disp = None
-            depth = None
-
-            if rectificacion_ok:
-                disp = calcular_disparidad(
-                    stereo,
-                    procesada_l,
-                    procesada_r
-                )
-
-                depth = disparidad_a_profundidad(
-                    disp,
-                    Q
-                )
-
-            display_l = procesada_l.copy()
-            display_r = procesada_r.copy()
-
-            roi_depth = None
-            gray_roi = None
-
-            # =============================================
-            # APLICAR ROI
-            # =============================================
-
-            if (
-                rectificacion_ok
-                and depth is not None
-                and USAR_ROI
-                and roi_data["seleccionado"]
-            ):
-                x = roi_data["x"]
-                y = roi_data["y"]
-                w = roi_data["w"]
-                h = roi_data["h"]
-
-                roi_l = procesada_l[
-                    y:y + h,
-                    x:x + w
-                ]
-
-                roi_depth = depth[
-                    y:y + h,
-                    x:x + w
-                ]
-
-                if (
-                    roi_l.size > 0
-                    and roi_depth.size > 0
-                ):
-                    gray_roi = cv2.cvtColor(
-                        roi_l,
-                        cv2.COLOR_BGR2GRAY
-                    )
-
-                    cv2.rectangle(
-                        display_l,
-                        (x, y),
-                        (x + w, y + h),
-                        (0, 255, 0),
-                        3
-                    )
-
-                    cv2.rectangle(
-                        display_r,
-                        (x, y),
-                        (x + w, y + h),
-                        (0, 255, 0),
-                        3
-                    )
-
-            elif (
-                rectificacion_ok
-                and depth is not None
-            ):
-                roi_depth = depth
-
-                gray_roi = cv2.cvtColor(
-                    procesada_l,
-                    cv2.COLOR_BGR2GRAY
-                )
-
-            # =============================================
-            # ALTURA
-            # =============================================
-
-            texto_altura = "Altura: ---"
-            z_superficie = None
-            altura_mm = None
-            cantidad_validos = 0
-
-            if (
-                rectificacion_ok
-                and estado["z_ref"] is not None
-                and gray_roi is not None
-                and roi_depth is not None
-            ):
-                mask = detectar_superficie(gray_roi)
-
+            if writer_l is None or writer_r is None:
                 (
-                    z_superficie,
-                    cantidad_validos
-                ) = obtener_profundidad_superficie(
-                    roi_depth,
-                    mask
+                    writer_l,
+                    writer_r,
+                    out_w,
+                    out_h,
+                ) = abrir_writers(
+                    rutas,
+                    img_l,
                 )
 
-                if z_superficie is not None:
-                    altura_mm = estimar_altura(
-                        z_superficie,
-                        estado["z_ref"]
-                    )
-
-                    texto_altura = (
-                        f"Altura: {altura_mm:.2f} mm"
-                    )
-
-            # =============================================
-            # REGISTRO
-            # =============================================
-
+            # Guardar imágenes limpias, antes de dibujar overlays.
             if estado["grabando"]:
+                frame_l_guardado = cv2.resize(
+                    img_l,
+                    (out_w, out_h),
+                    interpolation=cv2.INTER_AREA,
+                )
+
+                frame_r_guardado = cv2.resize(
+                    img_r,
+                    (out_w, out_h),
+                    interpolation=cv2.INTER_AREA,
+                )
+
+                writer_l.write(
+                    frame_l_guardado
+                )
+
+                writer_r.write(
+                    frame_r_guardado
+                )
+
+                tiempo_grabacion = (
+                    time.perf_counter()
+                    - estado["t_inicio_grabacion"]
+                )
+
                 timestamp = datetime.now().strftime(
                     "%Y-%m-%d %H:%M:%S.%f"
                 )[:-3]
 
-                tiempo_s = (
-                    time.time() - estado["t_inicio"]
-                )
+                if csv_writer is not None:
+                    csv_writer.writerow([
+                        estado["frame_global"],
+                        estado["frame_grabado"],
+                        timestamp,
+                        tiempo_grabacion,
+                        fps_real,
+                        FPS_OBJETIVO,
+                        EXPOSICION_US,
+                    ])
 
-                if altura_mm is not None:
-                    with lock:
-                        tiempos.append(tiempo_s)
-                        alturas.append(altura_mm)
+                    csv_file.flush()
 
-                writer.writerow([
-                    timestamp,
-                    tiempo_s,
-                    (
-                        altura_mm
-                        if altura_mm is not None
-                        else ""
-                    ),
-                    (
-                        altura_mm / 10.0
-                        if altura_mm is not None
-                        else ""
-                    ),
-                    (
-                        estado["z_ref"]
-                        if estado["z_ref"] is not None
-                        else ""
-                    ),
-                    (
-                        z_superficie
-                        if z_superficie is not None
-                        else ""
-                    ),
-                    rectificacion_ok,
-                    estado["rotacion_nombre"]
-                ])
+                estado["frame_grabado"] += 1
 
-                csv_file.flush()
-
-            # =============================================
-            # OVERLAY
-            # =============================================
-
-            titulo_1 = f"Camara 1 - {modo_texto}"
-            titulo_2 = f"Camara 2 - {modo_texto}"
-
-            put_text_outline(
-                display_l,
-                titulo_1,
-                (40, 60),
-                0.9,
-                (255, 255, 0)
+            combined = crear_vista(
+                img_l,
+                img_r,
+                fps_real,
             )
-
-            put_text_outline(
-                display_r,
-                titulo_2,
-                (40, 60),
-                0.9,
-                (255, 255, 0)
-            )
-
-            put_text_outline(
-                display_l,
-                f"Frame: {frame_id}",
-                (40, 115),
-                0.8,
-                (255, 255, 255)
-            )
-
-            put_text_outline(
-                display_l,
-                texto_altura,
-                (40, 170),
-                0.9,
-                (
-                    (0, 255, 0)
-                    if altura_mm is not None
-                    else (0, 165, 255)
-                )
-            )
-
-            put_text_outline(
-                display_l,
-                (
-                    "Rectificacion: OK"
-                    if rectificacion_ok
-                    else "Rectificacion: FALLIDA"
-                ),
-                (40, 225),
-                0.75,
-                (
-                    (0, 255, 0)
-                    if rectificacion_ok
-                    else (0, 0, 255)
-                )
-            )
-
-            put_text_outline(
-                display_l,
-                (
-                    "Rotacion: "
-                    + estado["rotacion_nombre"]
-                ),
-                (40, 275),
-                0.7,
-                (255, 255, 255)
-            )
-
-            if estado["z_ref"] is not None:
-                put_text_outline(
-                    display_l,
-                    (
-                        f"Z ref: "
-                        f"{estado['z_ref']:.2f} mm"
-                    ),
-                    (40, 325),
-                    0.7,
-                    (220, 220, 220)
-                )
-
-            put_text_outline(
-                display_l,
-                (
-                    "R: referencia | G: grabar | "
-                    "S: detener | P: nuevo ROI | Q: salir"
-                ),
-                (40, 380),
-                0.55,
-                (220, 220, 220)
-            )
-
-            if estado["grabando"]:
-                put_text_outline(
-                    display_l,
-                    "REC",
-                    (40, 435),
-                    1.1,
-                    (0, 0, 255)
-                )
-
-            if DIBUJAR_LINEAS_EPIPOLARES:
-                display_l = dibujar_lineas_horizontales(
-                    display_l,
-                    SEPARACION_LINEAS_PX
-                )
-
-                display_r = dibujar_lineas_horizontales(
-                    display_r,
-                    SEPARACION_LINEAS_PX
-                )
-
-            # =============================================
-            # MOSTRAR
-            # =============================================
-
-            vista_w, vista_h = calcular_tamano_salida(
-                display_l,
-                ancho_salida=640
-            )
-
-            vista_l = cv2.resize(
-                display_l,
-                (vista_w, vista_h)
-            )
-
-            vista_r = cv2.resize(
-                display_r,
-                (vista_w, vista_h)
-            )
-
-            combined = np.hstack([
-                vista_l,
-                vista_r
-            ])
 
             cv2.imshow(
-                "Camaras Estereo",
-                combined
+                "Camaras Estereo RAW",
+                combined,
             )
-
-            if depth is not None:
-                depth_color = visualizar_depth(depth)
-            else:
-                depth_color = np.zeros(
-                    procesada_l.shape,
-                    dtype=np.uint8
-                )
-
-                put_text_outline(
-                    depth_color,
-                    "Sin profundidad: rectificacion no valida",
-                    (40, 80),
-                    0.8,
-                    (0, 0, 255)
-                )
-
-            cv2.imshow(
-                "Mapa de Profundidad",
-                depth_color
-            )
-
-            # =============================================
-            # GUARDAR VIDEO
-            # =============================================
-
-            if estado["grabando"]:
-                out_w = int(
-                    video_l.get(
-                        cv2.CAP_PROP_FRAME_WIDTH
-                    )
-                )
-
-                out_h = int(
-                    video_l.get(
-                        cv2.CAP_PROP_FRAME_HEIGHT
-                    )
-                )
-
-                video_l.write(
-                    cv2.resize(
-                        display_l,
-                        (out_w, out_h)
-                    )
-                )
-
-                video_r.write(
-                    cv2.resize(
-                        display_r,
-                        (out_w, out_h)
-                    )
-                )
-
-            # =============================================
-            # TECLAS
-            # =============================================
 
             key = cv2.waitKey(1) & 0xFF
 
-            if key in (ord("r"), ord("R")):
-                if (
-                    not rectificacion_ok
-                    or gray_roi is None
-                    or roi_depth is None
-                ):
-                    print(
-                        "\nNo se puede capturar referencia: "
-                        "la rectificación/profundidad "
-                        "no es válida."
+            if key in (ord("g"), ord("G")):
+                if not estado["grabando"]:
+                    estado["grabando"] = True
+                    estado["t_inicio_grabacion"] = (
+                        time.perf_counter()
                     )
-                else:
-                    mask = detectar_superficie(
-                        gray_roi
-                    )
+                    estado["frame_grabado"] = 0
 
-                    (
-                        nueva_ref,
-                        cantidad_validos
-                    ) = obtener_profundidad_superficie(
-                        roi_depth,
-                        mask
-                    )
-
-                    if nueva_ref is None:
-                        print(
-                            "\nNo se pudo capturar "
-                            "la referencia."
-                        )
-
-                        print(
-                            "Píxeles válidos:",
-                            cantidad_validos
-                        )
-                    else:
-                        estado["z_ref"] = nueva_ref
-
-                        print(
-                            "\nReferencia capturada:",
-                            f"{nueva_ref:.3f} mm"
-                        )
-
-                        print(
-                            "Píxeles válidos:",
-                            cantidad_validos
-                        )
-
-            elif key in (ord("g"), ord("G")):
-                estado["grabando"] = True
-                estado["t_inicio"] = time.time()
-
-                print("\nGrabación iniciada.")
+                    print("\nGrabación iniciada a 30 FPS.")
 
             elif key in (ord("s"), ord("S")):
-                estado["grabando"] = False
+                if estado["grabando"]:
+                    estado["grabando"] = False
 
-                print("\nGrabación detenida.")
-
-            elif key in (ord("p"), ord("P")):
-                if rectificacion_ok:
-                    roi_data["seleccionado"] = False
-                    estado["z_ref"] = None
-
+                    print("\nGrabación detenida.")
                     print(
-                        "\nSeleccione un nuevo ROI."
-                    )
-                else:
-                    print(
-                        "\nNo se puede seleccionar ROI "
-                        "sin rectificación válida."
+                        "Frames guardados:",
+                        estado["frame_grabado"],
                     )
 
-            elif key in (ord("q"), ord("Q")):
+            elif key in (ord("q"), ord("Q"), 27):
                 estado["activo"] = False
                 break
 
-            frame_id += 1
+            estado["frame_global"] += 1
 
-            tiempo_transcurrido = (
-                time.time() - tiempo_frame_inicio
+            tiempo_usado = (
+                time.perf_counter()
+                - inicio_ciclo
             )
 
-            if tiempo_transcurrido < FRAME_TIME:
+            if tiempo_usado < FRAME_TIME:
                 time.sleep(
-                    FRAME_TIME - tiempo_transcurrido
+                    FRAME_TIME - tiempo_usado
                 )
-
-    except Exception as error:
-        estado["activo"] = False
-
-        print("\nERROR EN EL HILO DE CÁMARAS:")
-        print(type(error).__name__)
-        print(error)
 
     finally:
         if csv_file is not None:
             csv_file.close()
 
-        if video_l is not None:
-            video_l.release()
+        if writer_l is not None:
+            writer_l.release()
 
-        if video_r is not None:
-            video_r.release()
+        if writer_r is not None:
+            writer_r.release()
 
         cv2.destroyAllWindows()
 
@@ -1872,8 +874,6 @@ def hilo_camaras(
         except Exception:
             pass
 
-        estado["activo"] = False
-
         print("\nRecursos liberados correctamente.")
 
 
@@ -1889,59 +889,24 @@ def main():
 
     experimento = experimento.replace(
         " ",
-        "_"
+        "_",
     )
 
     if not experimento:
         experimento = "prueba_estereo"
 
-    base_dir = os.getcwd()
-
-    csv_path = os.path.join(
-        base_dir,
-        f"{experimento}.csv"
+    rutas = crear_rutas(
+        experimento
     )
-
-    video_l_path = os.path.join(
-        base_dir,
-        f"{experimento}_cam1.mp4"
-    )
-
-    video_r_path = os.path.join(
-        base_dir,
-        f"{experimento}_cam2.mp4"
-    )
-
-    grafico_path = os.path.join(
-        base_dir,
-        f"{experimento}_grafico_altura.png"
-    )
-
-    cal = cargar_calibracion()
 
     sdk, cam_l, cam_r = inicializar_camaras()
 
-    hilo = threading.Thread(
-        target=hilo_camaras,
-        args=(
-            cal,
-            sdk,
-            cam_l,
-            cam_r,
-            csv_path,
-            video_l_path,
-            video_r_path
-        ),
-        daemon=True
+    ejecutar_captura(
+        sdk,
+        cam_l,
+        cam_r,
+        rutas,
     )
-
-    hilo.start()
-
-    hilo_grafico(grafico_path)
-
-    estado["activo"] = False
-
-    hilo.join()
 
 
 if __name__ == "__main__":
