@@ -1,6 +1,7 @@
 import os
 import time
 import csv
+import math
 import cv2
 import numpy as np
 import matplotlib.pyplot as plt
@@ -18,6 +19,10 @@ NOMBRE_EXPERIENCIA = "II38P"
 
 # Frame usado para seleccionar puntos correspondientes.
 FRAME_ALINEACION = 500
+
+# Frame usado exclusivamente para seleccionar la máscara de la lanza.
+# Debe ser un frame donde la lanza sea claramente visible.
+FRAME_LANZA = 15000
 
 # =========================================================
 # ORIENTACIÓN DE LOS VIDEOS
@@ -88,16 +93,39 @@ NUM_DISPARITIES = 256
 BLOCK_SIZE = 7
 
 DISPARIDAD_ABS_MIN = 1.0
-DISPARIDAD_ABS_MAX = 250.0
-MIN_PIXELES_VALIDOS = 80
+DISPARIDAD_ABS_MAX = 500.0
+MIN_PIXELES_VALIDOS = 30
 
 # La espuma ocupa solo una parte del ROI. La mediana de todo el ROI
 # puede quedarse inmóvil. Se usa un percentil alto de la disparidad
 # absoluta para seguir la superficie más cercana a las cámaras.
-PERCENTIL_SUPERFICIE = 85.0
+PERCENTIL_SUPERFICIE = 75.0
 
 # Margen para descartar valores pegados a los límites de StereoSGBM.
 MARGEN_LIMITE_DISPARIDAD = 1.0
+
+# =========================================================
+# MEJORA PARA VIDEOS YA GRABADOS CON EXCESO DE LUZ
+# =========================================================
+#
+# Estas opciones no recuperan píxeles completamente saturados,
+# pero mejoran las zonas que todavía conservan información.
+MEJORAR_VIDEO_GRABADO = True
+
+# Gamma > 1 oscurece las zonas brillantes.
+GAMMA_CORRECCION = 1.5
+
+# CLAHE moderado para recuperar contraste local.
+CLAHE_CLIP_LIMIT = 1.5
+CLAHE_TILE_GRID = (8, 8)
+
+# Descartar píxeles casi negros o casi blancos.
+INTENSIDAD_MIN_VALIDA = 2
+INTENSIDAD_MAX_VALIDA = 253
+
+# Se conserva por compatibilidad, pero el código ya no rechaza el ROI
+# completo por porcentaje inválido; usa MIN_PIXELES_VALIDOS.
+FRACCION_MAX_SATURADA_ROI = 0.98
 
 # Visualización y guardado.
 MOSTRAR_LINEAS_EPIPOLARES = True
@@ -119,14 +147,33 @@ roi_data = {
     "h": 0,
 }
 
+# Zona de exclusión para la lanza.
+# Esta región puede estar dentro del ROI, pero no participa
+# en el cálculo de disparidad ni altura.
+lanza_data = {
+    "seleccionado": False,
+    "x": 0,
+    "y": 0,
+    "w": 0,
+    "h": 0,
+}
+
 estado = {
     "pausado": True,
     "guardando": False,
     "d_ref": None,
     "K_ref": None,
+    "pixeles_validos_roi": 0,
+    "fraccion_valida_roi": 0.0,
+    "motivo_disparidad_invalida": "",
 }
 
 historial_altura = []
+
+# Últimas disparidades válidas. Al presionar R se usa la mediana,
+# evitando depender de un único frame ruidoso.
+historial_disparidad_valida = []
+MAX_HISTORIAL_DISPARIDAD = 15
 tiempos_resultados = []
 alturas_resultados = []
 
@@ -830,6 +877,163 @@ def alinear_y_recortar(frame_l, frame_r, M, crop):
     )
 
 
+
+# =========================================================
+# RANGO DE DISPARIDAD AUTOMÁTICO
+# =========================================================
+
+def configurar_rango_disparidad_automatico(
+    puntos_l,
+    puntos_r,
+    M,
+):
+    """
+    Estima automáticamente el signo y rango de disparidad usando los
+    puntos manuales ya seleccionados.
+
+    Esto evita usar un rango fijo equivocado, como 0...703 px, cuando
+    la disparidad real puede ser negativa.
+    """
+
+    global MIN_DISPARITY
+    global NUM_DISPARITIES
+    global DISPARIDAD_ABS_MAX
+
+    puntos_l = np.asarray(
+        puntos_l,
+        dtype=np.float32,
+    )
+
+    puntos_r = np.asarray(
+        puntos_r,
+        dtype=np.float32,
+    )
+
+    puntos_r_alineados = cv2.transform(
+        puntos_r.reshape(-1, 1, 2),
+        M.astype(np.float32),
+    ).reshape(-1, 2)
+
+    disparidades = (
+        puntos_l[:, 0]
+        - puntos_r_alineados[:, 0]
+    )
+
+    disparidades = disparidades[
+        np.isfinite(disparidades)
+    ]
+
+    if len(disparidades) < 4:
+        raise RuntimeError(
+            "No hay suficientes puntos para estimar "
+            "el rango de disparidad."
+        )
+
+    mediana = float(
+        np.median(disparidades)
+    )
+
+    mad = float(
+        np.median(
+            np.abs(
+                disparidades - mediana
+            )
+        )
+    )
+
+    dispersion = max(
+        1.4826 * mad,
+        8.0,
+    )
+
+    # Margen amplio para cubrir variaciones de profundidad de la espuma.
+    margen = max(
+        96.0,
+        6.0 * dispersion,
+    )
+
+    limite_inferior = mediana - margen
+    limite_superior = mediana + margen
+
+    min_disp = int(
+        math.floor(
+            limite_inferior / 16.0
+        ) * 16
+    )
+
+    max_disp = int(
+        math.ceil(
+            limite_superior / 16.0
+        ) * 16
+    )
+
+    num_disp = max_disp - min_disp
+
+    num_disp = max(
+        128,
+        int(
+            math.ceil(
+                num_disp / 16.0
+            ) * 16
+        ),
+    )
+
+    # Evita un rango excesivo que vuelva el cálculo innecesariamente lento.
+    num_disp = min(
+        num_disp,
+        512,
+    )
+
+    MIN_DISPARITY = min_disp
+    NUM_DISPARITIES = num_disp
+
+    DISPARIDAD_ABS_MAX = float(
+        max(
+            abs(MIN_DISPARITY),
+            abs(
+                MIN_DISPARITY
+                + NUM_DISPARITIES
+            ),
+        )
+        + 16.0
+    )
+
+    print("\n===================================")
+    print("RANGO DE DISPARIDAD AUTOMÁTICO")
+    print("===================================")
+    print(
+        "Disparidades manuales:",
+        np.round(
+            disparidades,
+            2,
+        ),
+    )
+    print(
+        f"Mediana estimada: {mediana:.3f} px"
+    )
+    print(
+        f"MIN_DISPARITY: {MIN_DISPARITY}"
+    )
+    print(
+        f"NUM_DISPARITIES: {NUM_DISPARITIES}"
+    )
+    print(
+        "Rango SGBM:",
+        MIN_DISPARITY,
+        "a",
+        MIN_DISPARITY
+        + NUM_DISPARITIES
+        - 1,
+        "px",
+    )
+
+    return (
+        MIN_DISPARITY,
+        NUM_DISPARITIES,
+        disparidades,
+    )
+
+
 # =========================================================
 # ROI
 # =========================================================
@@ -860,6 +1064,132 @@ def seleccionar_roi(img):
 
     print(f"ROI: x={x}, y={y}, w={w}, h={h}")
     return True
+
+
+def seleccionar_mascara_lanza(img):
+    """
+    Permite seleccionar una zona rectangular que contiene la lanza.
+
+    Esa zona se excluirá completamente del cálculo de disparidad
+    dentro del ROI.
+    """
+
+    mascara = cv2.selectROI(
+        "Seleccionar zona de la lanza",
+        img,
+        showCrosshair=True,
+        fromCenter=False,
+    )
+
+    cv2.destroyWindow("Seleccionar zona de la lanza")
+
+    x, y, w, h = map(int, mascara)
+
+    if w <= 0 or h <= 0:
+        lanza_data.update({
+            "seleccionado": False,
+            "x": 0,
+            "y": 0,
+            "w": 0,
+            "h": 0,
+        })
+
+        print(
+            "No se seleccionó máscara de lanza. "
+            "La lanza no será excluida."
+        )
+        return False
+
+    lanza_data.update({
+        "seleccionado": True,
+        "x": x,
+        "y": y,
+        "w": w,
+        "h": h,
+    })
+
+    print(
+        f"Máscara de lanza: x={x}, y={y}, w={w}, h={h}"
+    )
+
+    return True
+
+
+# =========================================================
+# PREPROCESAMIENTO DE INTENSIDAD
+# =========================================================
+
+def aplicar_gamma_gray(gray, gamma):
+    """
+    Corrige brillo en una imagen de 8 bits.
+
+    gamma > 1 oscurece regiones brillantes.
+    gamma < 1 aclara regiones oscuras.
+    """
+
+    if gamma <= 0:
+        raise ValueError("gamma debe ser mayor que cero.")
+
+    tabla = np.array(
+        [
+            ((i / 255.0) ** gamma) * 255.0
+            for i in range(256)
+        ],
+        dtype=np.float32,
+    )
+
+    tabla = np.clip(
+        tabla,
+        0,
+        255,
+    ).astype(np.uint8)
+
+    return cv2.LUT(
+        gray,
+        tabla,
+    )
+
+
+def mejorar_gray_para_estereo(gray):
+    """
+    Mejora contraste sin inventar textura.
+
+    1. Comprime las altas luces con gamma.
+    2. Aplica CLAHE moderado.
+    """
+
+    if not MEJORAR_VIDEO_GRABADO:
+        return gray.copy()
+
+    corregida = aplicar_gamma_gray(
+        gray,
+        GAMMA_CORRECCION,
+    )
+
+    clahe = cv2.createCLAHE(
+        clipLimit=CLAHE_CLIP_LIMIT,
+        tileGridSize=CLAHE_TILE_GRID,
+    )
+
+    return clahe.apply(
+        corregida
+    )
+
+
+def calcular_mascara_intensidad_valida(
+    gray_l_original,
+    gray_r_original,
+):
+    """
+    Conserva solo píxeles con intensidad útil en ambas cámaras.
+    """
+
+    return (
+        (gray_l_original >= INTENSIDAD_MIN_VALIDA)
+        & (gray_l_original <= INTENSIDAD_MAX_VALIDA)
+        & (gray_r_original >= INTENSIDAD_MIN_VALIDA)
+        & (gray_r_original <= INTENSIDAD_MAX_VALIDA)
+    )
 
 
 # =========================================================
@@ -893,22 +1223,35 @@ def calcular_disparidad(stereo, img_l, img_r):
     Calcula el mapa de disparidad y elimina correctamente el valor inválido
     que StereoSGBM usa para los píxeles sin correspondencia.
 
-    Con MIN_DISPARITY = -128, StereoSGBM devuelve aproximadamente -129
-    para un píxel inválido. El código anterior aplicaba abs(-129)=129 y lo
-    interpretaba como una disparidad real; por eso la lectura quedaba fija
-    en 129 px y la altura permanecía en 0 mm.
+    El valor inválido de StereoSGBM es minDisparity - 1.
+
+    En esta versión el rango se amplía a 0...703 px porque la lectura de
+    127.000 px observada anteriormente correspondía al límite superior
+    artificial del rango -128...127, no a la superficie real.
     """
 
-    gray_l = cv2.cvtColor(img_l, cv2.COLOR_BGR2GRAY)
-    gray_r = cv2.cvtColor(img_r, cv2.COLOR_BGR2GRAY)
-
-    clahe = cv2.createCLAHE(
-        clipLimit=2.0,
-        tileGridSize=(8, 8),
+    gray_l_original = cv2.cvtColor(
+        img_l,
+        cv2.COLOR_BGR2GRAY,
     )
 
-    gray_l = clahe.apply(gray_l)
-    gray_r = clahe.apply(gray_r)
+    gray_r_original = cv2.cvtColor(
+        img_r,
+        cv2.COLOR_BGR2GRAY,
+    )
+
+    mascara_intensidad = calcular_mascara_intensidad_valida(
+        gray_l_original,
+        gray_r_original,
+    )
+
+    gray_l = mejorar_gray_para_estereo(
+        gray_l_original
+    )
+
+    gray_r = mejorar_gray_para_estereo(
+        gray_r_original
+    )
 
     disp = stereo.compute(
         gray_l,
@@ -934,6 +1277,7 @@ def calcular_disparidad(stereo, img_l, img_r):
         | (disp > limite_superior - MARGEN_LIMITE_DISPARIDAD)
         | (np.abs(disp) < DISPARIDAD_ABS_MIN)
         | (np.abs(disp) > DISPARIDAD_ABS_MAX)
+        | (~mascara_intensidad)
     )
 
     disp[invalidos] = np.nan
@@ -983,12 +1327,18 @@ def obtener_disparidad_roi(disp):
     """
     Obtiene una disparidad representativa de la superficie dentro del ROI.
 
-    No se usa la mediana de todo el ROI porque las burbujas pueden ocupar
-    menos del 50 % del área. Se usa un percentil alto de |disparidad| para
-    seguir las partes de la superficie que están más cerca de las cámaras.
+    La lanza se excluye mediante su máscara. Los píxeles saturados, oscuros
+    o sin correspondencia quedan como NaN. No se rechaza todo el ROI solo
+    porque tenga muchas zonas inválidas: basta con que sobreviva una cantidad
+    mínima de píxeles útiles.
     """
 
+    estado["motivo_disparidad_invalida"] = ""
+    estado["pixeles_validos_roi"] = 0
+    estado["fraccion_valida_roi"] = 0.0
+
     if not roi_data["seleccionado"]:
+        estado["motivo_disparidad_invalida"] = "ROI no seleccionado"
         return None, 0
 
     x = roi_data["x"]
@@ -996,29 +1346,60 @@ def obtener_disparidad_roi(disp):
     w = roi_data["w"]
     h = roi_data["h"]
 
-    roi = disp[y:y + h, x:x + w]
+    roi = disp[y:y + h, x:x + w].copy()
 
     if roi.size == 0:
+        estado["motivo_disparidad_invalida"] = "ROI vacío"
         return None, 0
+
+    # Excluir la lanza aunque esté dentro del ROI principal.
+    if lanza_data["seleccionado"]:
+        lx = lanza_data["x"] - x
+        ly = lanza_data["y"] - y
+        lw = lanza_data["w"]
+        lh = lanza_data["h"]
+
+        x1 = max(0, lx)
+        y1 = max(0, ly)
+        x2 = min(w, lx + lw)
+        y2 = min(h, ly + lh)
+
+        if x2 > x1 and y2 > y1:
+            roi[y1:y2, x1:x2] = np.nan
 
     validos = np.isfinite(roi)
     cantidad = int(np.count_nonzero(validos))
 
+    estado["pixeles_validos_roi"] = cantidad
+    estado["fraccion_valida_roi"] = float(
+        cantidad / float(roi.size)
+    )
+
     if cantidad < MIN_PIXELES_VALIDOS:
+        estado["motivo_disparidad_invalida"] = (
+            f"solo {cantidad} píxeles válidos; "
+            f"se requieren {MIN_PIXELES_VALIDOS}"
+        )
         return None, cantidad
 
-    valores = np.abs(roi[validos]).astype(np.float32)
+    valores = np.abs(
+        roi[validos]
+    ).astype(np.float32)
 
-    # Eliminar valores extremos residuales mediante percentiles robustos.
-    p_bajo = float(np.percentile(valores, 5))
-    p_alto = float(np.percentile(valores, 99))
+    # Eliminar solamente extremos residuales.
+    if len(valores) >= 100:
+        p_bajo = float(np.percentile(valores, 2))
+        p_alto = float(np.percentile(valores, 99.5))
 
-    valores = valores[
-        (valores >= p_bajo)
-        & (valores <= p_alto)
-    ]
+        valores = valores[
+            (valores >= p_bajo)
+            & (valores <= p_alto)
+        ]
 
     if len(valores) < MIN_PIXELES_VALIDOS:
+        estado["motivo_disparidad_invalida"] = (
+            f"quedaron {len(valores)} píxeles tras filtrar"
+        )
         return None, len(valores)
 
     d_superficie = float(
@@ -1027,6 +1408,12 @@ def obtener_disparidad_roi(disp):
             PERCENTIL_SUPERFICIE,
         )
     )
+
+    if not np.isfinite(d_superficie):
+        estado["motivo_disparidad_invalida"] = (
+            "percentil de disparidad no finito"
+        )
+        return None, len(valores)
 
     return d_superficie, len(valores)
 
@@ -1187,6 +1574,26 @@ def main():
     print("Videos ya rotados por el código online:", VIDEOS_YA_ROTADOS_ONLINE)
     print("Rotación adicional cámara izquierda:", ROTACION_L)
     print("Rotación adicional cámara derecha:", ROTACION_R)
+    print("Frame para seleccionar la lanza:", FRAME_LANZA)
+    print("Mejora para videos brillantes:", MEJORAR_VIDEO_GRABADO)
+    print("Gamma:", GAMMA_CORRECCION)
+    print(
+        "Rango de intensidad válido:",
+        INTENSIDAD_MIN_VALIDA,
+        "-",
+        INTENSIDAD_MAX_VALIDA,
+    )
+    print(
+        "Rango de disparidad SGBM:",
+        MIN_DISPARITY,
+        "a",
+        MIN_DISPARITY + NUM_DISPARITIES - 1,
+        "px",
+    )
+    print(
+        "Percentil de superficie:",
+        PERCENTIL_SUPERFICIE,
+    )
 
     frame_alin_l = leer_frame(
         cap_l,
@@ -1215,6 +1622,12 @@ def main():
             puntos_l,
             puntos_r,
         )
+    )
+
+    configurar_rango_disparidad_automatico(
+        puntos_l,
+        puntos_r,
+        M,
     )
 
     crop = calcular_recorte_comun(
@@ -1282,6 +1695,56 @@ def main():
 
     cv2.destroyWindow("Confirmar alineacion vertical")
 
+    # =====================================================
+    # SELECCIÓN DE LA LANZA EN UN FRAME DONDE ES VISIBLE
+    # =====================================================
+
+    if FRAME_LANZA < 0 or FRAME_LANZA >= total_frames:
+        raise ValueError(
+            f"FRAME_LANZA={FRAME_LANZA} está fuera del video. "
+            f"El rango válido es 0 a {total_frames - 1}."
+        )
+
+    frame_lanza_l = leer_frame(
+        cap_l,
+        FRAME_LANZA,
+        "L",
+    )
+
+    frame_lanza_r = leer_frame(
+        cap_r,
+        FRAME_LANZA,
+        "R",
+    )
+
+    if frame_lanza_l is None or frame_lanza_r is None:
+        raise RuntimeError(
+            f"No se pudo leer FRAME_LANZA={FRAME_LANZA}."
+        )
+
+    lanza_l_alineada, lanza_r_alineada = alinear_y_recortar(
+        frame_lanza_l,
+        frame_lanza_r,
+        M,
+        crop,
+    )
+
+    print("\n===================================")
+    print("SELECCIÓN DE LA LANZA")
+    print("===================================")
+    print(
+        f"Se utilizará el frame {FRAME_LANZA}, "
+        "donde la lanza debe ser visible."
+    )
+    print(
+        "Selecciona un rectángulo que cubra completamente la lanza "
+        "y deja un pequeño margen alrededor."
+    )
+
+    seleccionar_mascara_lanza(
+        lanza_l_alineada
+    )
+
     np.savez(
         ruta_npz,
         M=M,
@@ -1306,6 +1769,30 @@ def main():
         altura_referencia_mm=np.asarray(
             ALTURA_REFERENCIA_MM,
             dtype=np.float64,
+        ),
+        lanza_seleccionada=np.asarray(
+            lanza_data["seleccionado"]
+        ),
+        lanza_rect=np.asarray(
+            [
+                lanza_data["x"],
+                lanza_data["y"],
+                lanza_data["w"],
+                lanza_data["h"],
+            ],
+            dtype=np.int32,
+        ),
+        frame_lanza=np.asarray(
+            FRAME_LANZA,
+            dtype=np.int32,
+        ),
+        min_disparity=np.asarray(
+            MIN_DISPARITY,
+            dtype=np.int32,
+        ),
+        num_disparities=np.asarray(
+            NUM_DISPARITIES,
+            dtype=np.int32,
         ),
     )
 
@@ -1416,6 +1903,7 @@ def main():
     print("G: comenzar guardado")
     print("S: detener guardado")
     print("P: seleccionar otro ROI")
+    print("L: seleccionar/actualizar máscara de lanza")
     print("Q: salir")
     print("Modo tiempo real:", MODO_TIEMPO_REAL)
     if MODO_TIEMPO_REAL:
@@ -1462,6 +1950,17 @@ def main():
                 disp
             )
 
+            if d_superficie is not None:
+                historial_disparidad_valida.append(
+                    float(d_superficie)
+                )
+
+                if (
+                    len(historial_disparidad_valida)
+                    > MAX_HISTORIAL_DISPARIDAD
+                ):
+                    historial_disparidad_valida.pop(0)
+
             z_actual = disparidad_a_distancia(
                 d_superficie
             )
@@ -1497,6 +1996,37 @@ def main():
                 (0, 255, 0),
                 2,
             )
+
+            if lanza_data["seleccionado"]:
+                lx = lanza_data["x"]
+                ly = lanza_data["y"]
+                lw = lanza_data["w"]
+                lh = lanza_data["h"]
+
+                cv2.rectangle(
+                    display_l,
+                    (lx, ly),
+                    (lx + lw, ly + lh),
+                    (0, 0, 255),
+                    2,
+                )
+
+                cv2.rectangle(
+                    display_r,
+                    (lx, ly),
+                    (lx + lw, ly + lh),
+                    (0, 0, 255),
+                    2,
+                )
+
+                put_text_outline(
+                    display_l,
+                    "LANZA EXCLUIDA",
+                    (lx, max(20, ly - 10)),
+                    0.45,
+                    (0, 0, 255),
+                    1,
+                )
 
             tiempo_s = frame_actual / fps
 
@@ -1552,10 +2082,39 @@ def main():
                 ),
             )
 
+            if (
+                d_superficie is not None
+                and d_superficie
+                >= MIN_DISPARITY + NUM_DISPARITIES
+                - 2.0 * MARGEN_LIMITE_DISPARIDAD
+            ):
+                put_text_outline(
+                    display_l,
+                    "ADVERTENCIA: DISPARIDAD CERCA DEL LIMITE",
+                    (20, 210),
+                    0.55,
+                    (0, 0, 255),
+                )
+
+            put_text_outline(
+                display_l,
+                (
+                    f"Validos ROI: {estado['pixeles_validos_roi']} "
+                    f"({100.0 * estado['fraccion_valida_roi']:.1f}%)"
+                ),
+                (20, 210),
+                0.52,
+                (
+                    (0, 255, 0)
+                    if estado["pixeles_validos_roi"] >= MIN_PIXELES_VALIDOS
+                    else (0, 165, 255)
+                ),
+            )
+
             put_text_outline(
                 display_l,
                 "ALINEACION VERTICAL - SIN DEFORMACION",
-                (20, 210),
+                (20, 245),
                 0.55,
                 (255, 255, 0),
             )
@@ -1564,7 +2123,7 @@ def main():
                 put_text_outline(
                     display_l,
                     "PAUSA",
-                    (20, 250),
+                    (20, 285),
                     0.9,
                     (0, 165, 255),
                 )
@@ -1573,7 +2132,7 @@ def main():
                 put_text_outline(
                     display_l,
                     "GUARDANDO",
-                    (20, 295),
+                    (20, 330),
                     0.9,
                     (0, 0, 255),
                 )
@@ -1582,7 +2141,7 @@ def main():
                 display_l,
                 (
                     "ESPACIO pausa | R referencia | "
-                    "G/S guardar | P ROI | Q salir"
+                    "G/S guardar | P ROI | L lanza | Q salir"
                 ),
                 (20, alto_salida - 20),
                 0.42,
@@ -1683,23 +2242,79 @@ def main():
                     frame_base_reproduccion = frame_actual
 
             elif key in (ord("r"), ord("R")):
-                if d_superficie is None:
-                    print("No hay disparidad válida para fijar la referencia. Revisa el mapa de disparidad y usa un ROI con textura.")
+                candidatos_ref = list(
+                    historial_disparidad_valida
+                )
+
+                if (
+                    not candidatos_ref
+                    and d_superficie is not None
+                ):
+                    candidatos_ref = [
+                        float(d_superficie)
+                    ]
+
+                if not candidatos_ref:
+                    print("\nNo hay disparidades válidas recientes.")
+                    print(
+                        "Motivo actual:",
+                        estado["motivo_disparidad_invalida"],
+                    )
+                    print(
+                        "Píxeles válidos en ROI:",
+                        estado["pixeles_validos_roi"],
+                    )
+                    print(
+                        "Rango SGBM actual:",
+                        MIN_DISPARITY,
+                        "a",
+                        MIN_DISPARITY
+                        + NUM_DISPARITIES
+                        - 1,
+                        "px",
+                    )
+                    print(
+                        "Deja reproducir algunos frames con el ROI "
+                        "sobre la espuma y vuelve a presionar R."
+                    )
                 else:
-                    estado["d_ref"] = d_superficie
-                    estado["K_ref"] = Z_REF_MM * d_superficie
+                    d_referencia = float(
+                        np.median(
+                            np.asarray(
+                                candidatos_ref,
+                                dtype=np.float64,
+                            )
+                        )
+                    )
+
+                    estado["d_ref"] = d_referencia
+                    estado["K_ref"] = (
+                        Z_REF_MM
+                        * d_referencia
+                    )
 
                     historial_altura.clear()
 
-                    print("\nReferencia fijada:")
-                    print(f"d_ref = {d_superficie:.6f} px")
-                    print(f"Z_ref = {Z_REF_MM:.3f} mm")
+                    print("\nReferencia fijada correctamente:")
+                    print(
+                        f"d_ref = {d_referencia:.6f} px"
+                    )
+                    print(
+                        f"Muestras usadas = "
+                        f"{len(candidatos_ref)}"
+                    )
+                    print(
+                        f"Z_ref = {Z_REF_MM:.3f} mm"
+                    )
                     print(
                         f"Altura inicial = "
                         f"{ALTURA_REFERENCIA_MM:.3f} mm "
                         f"({ALTURA_REFERENCIA_MM / 10.0:.2f} cm)"
                     )
-                    print(f"K_ref = {estado['K_ref']:.6f}")
+                    print(
+                        f"K_ref = "
+                        f"{estado['K_ref']:.6f}"
+                    )
 
             elif key in (ord("g"), ord("G")):
                 estado["guardando"] = True
@@ -1716,8 +2331,23 @@ def main():
                 estado["K_ref"] = None
 
                 historial_altura.clear()
+                historial_disparidad_valida.clear()
 
                 seleccionar_roi(alineada_l)
+
+            elif key in (ord("l"), ord("L")):
+                estado["pausado"] = True
+                seleccionar_mascara_lanza(alineada_l)
+
+                estado["d_ref"] = None
+                estado["K_ref"] = None
+                historial_altura.clear()
+                historial_disparidad_valida.clear()
+
+                print(
+                    "\nMáscara de lanza actualizada. "
+                    "Debes volver a presionar R."
+                )
 
             elif key in (ord("q"), ord("Q")):
                 break

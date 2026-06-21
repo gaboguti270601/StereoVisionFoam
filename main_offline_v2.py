@@ -99,6 +99,29 @@ PERCENTIL_SUPERFICIE = 85.0
 # Margen para descartar valores pegados a los límites de StereoSGBM.
 MARGEN_LIMITE_DISPARIDAD = 1.0
 
+# =========================================================
+# MEJORA PARA VIDEOS YA GRABADOS CON EXCESO DE LUZ
+# =========================================================
+#
+# Estas opciones no recuperan píxeles completamente saturados,
+# pero mejoran las zonas que todavía conservan información.
+MEJORAR_VIDEO_GRABADO = True
+
+# Gamma > 1 oscurece las zonas brillantes.
+GAMMA_CORRECCION = 1.5
+
+# CLAHE moderado para recuperar contraste local.
+CLAHE_CLIP_LIMIT = 1.5
+CLAHE_TILE_GRID = (8, 8)
+
+# Descartar píxeles casi negros o casi blancos.
+INTENSIDAD_MIN_VALIDA = 8
+INTENSIDAD_MAX_VALIDA = 245
+
+# Si una fracción demasiado grande del ROI está saturada,
+# se considera que la medición de ese frame no es confiable.
+FRACCION_MAX_SATURADA_ROI = 0.45
+
 # Visualización y guardado.
 MOSTRAR_LINEAS_EPIPOLARES = True
 SEPARACION_LINEAS = 50
@@ -863,6 +886,83 @@ def seleccionar_roi(img):
 
 
 # =========================================================
+# PREPROCESAMIENTO DE INTENSIDAD
+# =========================================================
+
+def aplicar_gamma_gray(gray, gamma):
+    """
+    Corrige brillo en una imagen de 8 bits.
+
+    gamma > 1 oscurece regiones brillantes.
+    gamma < 1 aclara regiones oscuras.
+    """
+
+    if gamma <= 0:
+        raise ValueError("gamma debe ser mayor que cero.")
+
+    tabla = np.array(
+        [
+            ((i / 255.0) ** gamma) * 255.0
+            for i in range(256)
+        ],
+        dtype=np.float32,
+    )
+
+    tabla = np.clip(
+        tabla,
+        0,
+        255,
+    ).astype(np.uint8)
+
+    return cv2.LUT(
+        gray,
+        tabla,
+    )
+
+
+def mejorar_gray_para_estereo(gray):
+    """
+    Mejora contraste sin inventar textura.
+
+    1. Comprime las altas luces con gamma.
+    2. Aplica CLAHE moderado.
+    """
+
+    if not MEJORAR_VIDEO_GRABADO:
+        return gray.copy()
+
+    corregida = aplicar_gamma_gray(
+        gray,
+        GAMMA_CORRECCION,
+    )
+
+    clahe = cv2.createCLAHE(
+        clipLimit=CLAHE_CLIP_LIMIT,
+        tileGridSize=CLAHE_TILE_GRID,
+    )
+
+    return clahe.apply(
+        corregida
+    )
+
+
+def calcular_mascara_intensidad_valida(
+    gray_l_original,
+    gray_r_original,
+):
+    """
+    Conserva solo píxeles con intensidad útil en ambas cámaras.
+    """
+
+    return (
+        (gray_l_original >= INTENSIDAD_MIN_VALIDA)
+        & (gray_l_original <= INTENSIDAD_MAX_VALIDA)
+        & (gray_r_original >= INTENSIDAD_MIN_VALIDA)
+        & (gray_r_original <= INTENSIDAD_MAX_VALIDA)
+    )
+
+
+# =========================================================
 # DISPARIDAD
 # =========================================================
 
@@ -899,16 +999,28 @@ def calcular_disparidad(stereo, img_l, img_r):
     en 129 px y la altura permanecía en 0 mm.
     """
 
-    gray_l = cv2.cvtColor(img_l, cv2.COLOR_BGR2GRAY)
-    gray_r = cv2.cvtColor(img_r, cv2.COLOR_BGR2GRAY)
-
-    clahe = cv2.createCLAHE(
-        clipLimit=2.0,
-        tileGridSize=(8, 8),
+    gray_l_original = cv2.cvtColor(
+        img_l,
+        cv2.COLOR_BGR2GRAY,
     )
 
-    gray_l = clahe.apply(gray_l)
-    gray_r = clahe.apply(gray_r)
+    gray_r_original = cv2.cvtColor(
+        img_r,
+        cv2.COLOR_BGR2GRAY,
+    )
+
+    mascara_intensidad = calcular_mascara_intensidad_valida(
+        gray_l_original,
+        gray_r_original,
+    )
+
+    gray_l = mejorar_gray_para_estereo(
+        gray_l_original
+    )
+
+    gray_r = mejorar_gray_para_estereo(
+        gray_r_original
+    )
 
     disp = stereo.compute(
         gray_l,
@@ -934,6 +1046,7 @@ def calcular_disparidad(stereo, img_l, img_r):
         | (disp > limite_superior - MARGEN_LIMITE_DISPARIDAD)
         | (np.abs(disp) < DISPARIDAD_ABS_MIN)
         | (np.abs(disp) > DISPARIDAD_ABS_MAX)
+        | (~mascara_intensidad)
     )
 
     disp[invalidos] = np.nan
@@ -1002,6 +1115,17 @@ def obtener_disparidad_roi(disp):
         return None, 0
 
     validos = np.isfinite(roi)
+
+    fraccion_invalida = float(
+        1.0
+        - (
+            np.count_nonzero(validos)
+            / float(roi.size)
+        )
+    )
+
+    if fraccion_invalida > FRACCION_MAX_SATURADA_ROI:
+        return None, int(np.count_nonzero(validos))
     cantidad = int(np.count_nonzero(validos))
 
     if cantidad < MIN_PIXELES_VALIDOS:
@@ -1187,6 +1311,14 @@ def main():
     print("Videos ya rotados por el código online:", VIDEOS_YA_ROTADOS_ONLINE)
     print("Rotación adicional cámara izquierda:", ROTACION_L)
     print("Rotación adicional cámara derecha:", ROTACION_R)
+    print("Mejora para videos brillantes:", MEJORAR_VIDEO_GRABADO)
+    print("Gamma:", GAMMA_CORRECCION)
+    print(
+        "Rango de intensidad válido:",
+        INTENSIDAD_MIN_VALIDA,
+        "-",
+        INTENSIDAD_MAX_VALIDA,
+    )
 
     frame_alin_l = leer_frame(
         cap_l,
