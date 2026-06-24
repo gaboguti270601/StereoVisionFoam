@@ -4,11 +4,6 @@ import numpy as np
 
 
 def get_scale(width, height, window_fraction=0.45):
-    """
-    Calcula una escala para ajustar las ventanas
-    al tamaño de la pantalla.
-    """
-
     root = tk.Tk()
     root.withdraw()
 
@@ -30,39 +25,6 @@ def automatic_canny_from_gradient(
     aperture_size=3,
     use_l2_gradient=True
 ):
-    """
-    Aplica Canny usando umbrales automáticos calculados
-    a partir de percentiles de la magnitud del gradiente Sobel.
-
-    Parámetros:
-        gray_img:
-            Imagen preprocesada en escala de grises.
-
-        low_percentile:
-            Percentil utilizado para el umbral inferior.
-
-        high_percentile:
-            Percentil utilizado para el umbral superior.
-
-        aperture_size:
-            Kernel Sobel interno de Canny.
-            Valores permitidos: 3, 5 o 7.
-
-        use_l2_gradient:
-            Si es True, Canny usa una magnitud de gradiente
-            más precisa.
-
-    Retorna:
-        edges:
-            Imagen binaria de bordes.
-
-        threshold_low:
-            Umbral inferior calculado.
-
-        threshold_high:
-            Umbral superior calculado.
-    """
-
     # Gradiente horizontal
     sobel_x = cv2.Sobel(
         gray_img,
@@ -151,33 +113,6 @@ def reproduce_canny_video(
     use_morph_close=False,
     morph_kernel_size=3
 ):
-    """
-    Reproduce el video mostrando:
-
-        1. Video original.
-        2. Video CLAHE oscurecido.
-        3. Canny automático basado en el gradiente Sobel.
-
-    Flujo de procesamiento:
-
-        video original
-        -> escala de grises
-        -> CLAHE
-        -> filtro bilateral
-        -> gradiente Sobel
-        -> cálculo automático de umbrales
-        -> Canny
-        -> cierre morfológico opcional
-
-    El oscurecimiento de CLAHE se usa únicamente
-    para visualizar la imagen y no afecta a Canny.
-
-    Controles:
-        Espacio: pausar o reanudar.
-        R: reiniciar desde el frame inicial.
-        Q o ESC: salir.
-    """
-
     cap = cv2.VideoCapture(video_path)
 
     if not cap.isOpened():
@@ -206,10 +141,6 @@ def reproduce_canny_video(
     # ---------------------------------------------------------
 
     if canny_aperture_size not in [3, 5, 7]:
-        print(
-            "Advertencia: CANNY_APERTURE_SIZE debe ser "
-            "3, 5 o 7. Se utilizará 3."
-        )
         canny_aperture_size = 3
 
     if low_percentile < 0:
@@ -219,10 +150,6 @@ def reproduce_canny_video(
         high_percentile = 100
 
     if low_percentile >= high_percentile:
-        print(
-            "Error: LOW_PERCENTILE debe ser menor "
-            "que HIGH_PERCENTILE."
-        )
         cap.release()
         return
 
@@ -532,9 +459,9 @@ def reproduce_canny_video(
 # CONFIGURACIÓN
 # =============================================================
 
-VIDEO_PATH = r"D:\MDT\Stereovision\II38P_cam2.mp4"
+VIDEO_PATH = r"D:\MDT\Stereovision\II38P_cam1.mp4"
 
-START_FRAME = 35000
+START_FRAME = 19000
 
 # -------------------------------------------------------------
 # CLAHE
@@ -544,7 +471,7 @@ CLAHE_CLIP_LIMIT = 1.2
 CLAHE_GRID_SIZE = (8, 8)
 
 # Solo modifica cómo se muestra la ventana CLAHE.
-CLAHE_BRIGHTNESS_ALPHA = 0.55
+CLAHE_BRIGHTNESS_ALPHA = 0.45
 CLAHE_BRIGHTNESS_BETA = 0
 
 # -------------------------------------------------------------
