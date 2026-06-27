@@ -27,8 +27,7 @@ os.add_dll_directory(DLL_PATH)
 # CONFIGURACIÓN GENERAL
 # =========================================================
 
-#CAMARA_L_SERIAL = "36933"
-CAMARA_L_SERIAL = "28327"
+CAMARA_L_SERIAL = "18842"
 CAMARA_R_SERIAL = "36930"
 
 EXPOSICION_US = 40
